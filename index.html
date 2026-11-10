@@ -4,20 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>题库刷题助手</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.staticfile.org/tailwindcss/3.4.1/tailwind.min.js"></script>
+<script src="libs/tailwind.min.js"></script>
 <style>
-  /* 基础兜底样式，防止 CDN 都加载失败时页面全黑错乱 */
+  /* 基础兜底样式，防止样式加载失败时页面错乱 */
   body { margin: 0; background: #f3f4f6; color: #1f2937; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
   .hidden { display: none !important; }
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
   .modal-overlay.hidden { display: none !important; }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="libs/xlsx.full.min.js"></script>
+<script src="libs/marked.min.js"></script>
+<link rel="stylesheet" href="libs/katex.min.css">
+<script src="libs/katex.min.js"></script>
+<script src="libs/supabase.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
@@ -860,10 +859,7 @@ function dbAdd(storeName, data) {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     const req = store.add(data);
-    req.onsuccess = () => {
-      resolve(req.result);
-      syncToCloud();
-    };
+    req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
@@ -873,10 +869,7 @@ function dbPut(storeName, data) {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     const req = store.put(data);
-    req.onsuccess = () => {
-      resolve(req.result);
-      syncToCloud();
-    };
+    req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
@@ -973,7 +966,7 @@ let isSyncingFromCloud = false; // 正在从云端导入时，不要回传
 
 function initCloudSync() {
   try {
-    if (typeof supabase !== 'undefined' && window.supabase) {
+    if (window.supabase && typeof window.supabase.createClient === 'function') {
       supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
       cloudEnabled = true;
       return true;
@@ -6054,18 +6047,24 @@ window.addEventListener('resize', () => {
 async function init() {
   await openDB();
   
-  // 初始化云端同步
-  initCloudSync();
-  if (cloudEnabled) {
-    // 先尝试从云端拉取最新数据
-    const result = await syncFromCloud();
-    if (result.success) {
-      console.log('从云端同步数据成功');
-    } else if (result.reason === 'no_data') {
-      // 云端没数据，把本地数据传上去
-      console.log('云端无数据，上传本地数据');
-      syncToCloud();
+  // 初始化云端同步（容错：就算云同步挂了也不影响主功能）
+  try {
+    initCloudSync();
+    if (cloudEnabled) {
+      // 先尝试从云端拉取最新数据
+      const result = await syncFromCloud();
+      if (result.success) {
+        console.log('从云端同步数据成功');
+      } else if (result.reason === 'no_data') {
+        // 云端没数据，把本地数据传上去
+        console.log('云端无数据，上传本地数据');
+        syncToCloud();
+      }
     }
+  } catch(e) {
+    console.warn('云端同步初始化失败，继续使用本地模式:', e);
+    cloudEnabled = false;
+    updateSyncStatus('idle');
   }
   
   loadBanks();
