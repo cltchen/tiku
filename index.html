@@ -17,6 +17,7 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   * { box-sizing: border-box; }
   body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
@@ -94,8 +95,10 @@
         错题本
       </div>
     </nav>
-    <div class="p-3 border-t border-gray-100 text-xs text-gray-400 text-center">
-      数据保存在本地浏览器中
+    <div class="p-3 border-t border-gray-100 text-xs text-gray-400">
+      <div id="cloudSyncStatus" class="flex items-center justify-center gap-1 cursor-pointer hover:text-gray-600 transition" onclick="manualSync()" title="点击手动同步">
+        <span class="text-gray-400">☁️ 云端同步</span>
+      </div>
     </div>
   </aside>
 
@@ -857,7 +860,10 @@ function dbAdd(storeName, data) {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     const req = store.add(data);
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      resolve(req.result);
+      syncToCloud();
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -867,7 +873,10 @@ function dbPut(storeName, data) {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     const req = store.put(data);
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      resolve(req.result);
+      syncToCloud();
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -908,7 +917,10 @@ function dbDelete(storeName, key) {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     const req = store.delete(key);
-    req.onsuccess = () => resolve();
+    req.onsuccess = () => {
+      resolve();
+      syncToCloud();
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -926,6 +938,7 @@ function dbDeleteByIndex(storeName, indexName, value) {
         cursor.continue();
       } else {
         resolve();
+        syncToCloud();
       }
     };
     req.onerror = () => reject(req.error);
@@ -937,13 +950,245 @@ function dbAddBatch(storeName, dataList) {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     dataList.forEach(item => store.add(item));
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => {
+      resolve();
+      syncToCloud();
+    };
     tx.onerror = () => reject(tx.error);
   });
 }
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+}
+
+// ========== 云端同步（Supabase） ==========
+const SUPABASE_URL = 'https://nkscbmongsdstijnubkb.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_-OPF8_GhNFascgJXMnjfzg_yS26Stz5';
+let supabase = null;
+let syncStatus = 'idle'; // idle / syncing / synced / error
+let syncTimer = null;
+let cloudEnabled = false;
+let isSyncingFromCloud = false; // 正在从云端导入时，不要回传
+
+function initCloudSync() {
+  try {
+    if (typeof supabase !== 'undefined' && window.supabase) {
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+      cloudEnabled = true;
+      return true;
+    }
+  } catch(e) {
+    console.warn('Supabase 初始化失败:', e);
+  }
+  cloudEnabled = false;
+  return false;
+}
+
+// 导出所有数据为一个 JSON 对象
+async function exportAllData() {
+  const banks = await dbGetAll('banks');
+  const questions = await dbGetAll('questions');
+  const records = await dbGetAll('records');
+  
+  // 收集 localStorage 中的设置
+  const settings = {};
+  try {
+    const keys = ['ai_api_key', 'ai_api_base', 'ai_model', 'aiFabPosition', 'current_page'];
+    keys.forEach(k => {
+      const v = localStorage.getItem(k);
+      if (v) settings[k] = v;
+    });
+  } catch(e) {}
+  
+  return {
+    version: 1,
+    updatedAt: Date.now(),
+    banks,
+    questions,
+    records,
+    settings
+  };
+}
+
+// 导入 JSON 数据到本地
+async function importAllData(data) {
+  if (!data || !data.banks) return false;
+  
+  isSyncingFromCloud = true; // 标记：正在从云端导入，不要回传
+  
+  try {
+    // 清空现有数据
+    const stores = ['banks', 'questions', 'records'];
+    for (const store of stores) {
+      const tx = db.transaction(store, 'readwrite');
+      const storeObj = tx.objectStore(store);
+      storeObj.clear();
+      await new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    
+    // 写入新数据
+    if (data.banks && data.banks.length) {
+      for (const item of data.banks) {
+        await dbAdd('banks', item).catch(() => dbPut('banks', item));
+      }
+    }
+    if (data.questions && data.questions.length) {
+      for (const item of data.questions) {
+        await dbAdd('questions', item).catch(() => dbPut('questions', item));
+      }
+    }
+    if (data.records && data.records.length) {
+      for (const item of data.records) {
+        await dbAdd('records', item).catch(() => dbPut('records', item));
+      }
+    }
+    
+    // 恢复设置
+    if (data.settings) {
+      for (const [k, v] of Object.entries(data.settings)) {
+        try { localStorage.setItem(k, v); } catch(e) {}
+      }
+    }
+    
+    return true;
+  } catch(e) {
+    console.error('导入数据失败:', e);
+    return false;
+  } finally {
+    setTimeout(() => { isSyncingFromCloud = false; }, 500);
+  }
+}
+
+// 上传数据到云端（防抖）
+function syncToCloud() {
+  if (!cloudEnabled || !supabase || isSyncingFromCloud) return;
+  
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(async () => {
+    await doSyncToCloud();
+  }, 2000); // 2秒防抖
+}
+
+async function doSyncToCloud() {
+  if (!cloudEnabled || !supabase) return;
+  
+  try {
+    updateSyncStatus('syncing');
+    const data = await exportAllData();
+    const jsonStr = JSON.stringify(data);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    
+    const { error } = await supabase.storage
+      .from('quiz-data')
+      .upload('quiz-data.json', blob, {
+        contentType: 'application/json',
+        upsert: true
+      });
+    
+    if (error) throw error;
+    updateSyncStatus('synced');
+    
+    // 3秒后回到 idle 状态
+    setTimeout(() => {
+      if (syncStatus === 'synced') updateSyncStatus('idle');
+    }, 3000);
+  } catch(e) {
+    console.error('同步到云端失败:', e);
+    updateSyncStatus('error');
+  }
+}
+
+// 从云端拉取数据
+async function syncFromCloud() {
+  if (!cloudEnabled || !supabase) return { success: false, reason: 'cloud_disabled' };
+  
+  try {
+    updateSyncStatus('syncing');
+    
+    const { data, error } = await supabase.storage
+      .from('quiz-data')
+      .download('quiz-data.json');
+    
+    if (error) {
+      if (error.message.includes('not found') || error.statusCode === '404') {
+        // 云端还没有数据，正常
+        updateSyncStatus('idle');
+        return { success: false, reason: 'no_data' };
+      }
+      throw error;
+    }
+    
+    const jsonStr = await data.text();
+    const cloudData = JSON.parse(jsonStr);
+    
+    // 比较时间戳
+    const localUpdatedAt = parseInt(localStorage.getItem('cloud_last_sync') || '0');
+    const cloudUpdatedAt = cloudData.updatedAt || 0;
+    
+    updateSyncStatus('idle');
+    
+    if (cloudUpdatedAt > localUpdatedAt) {
+      // 云端更新，导入
+      const ok = await importAllData(cloudData);
+      if (ok) {
+        localStorage.setItem('cloud_last_sync', cloudUpdatedAt.toString());
+        return { success: true, data: cloudData };
+      }
+    }
+    
+    return { success: false, reason: 'local_newer' };
+  } catch(e) {
+    console.error('从云端同步失败:', e);
+    updateSyncStatus('error');
+    return { success: false, reason: 'error', error: e };
+  }
+}
+
+// 更新同步状态显示
+function updateSyncStatus(status) {
+  syncStatus = status;
+  const el = document.getElementById('cloudSyncStatus');
+  if (!el) return;
+  
+  const statusMap = {
+    idle: { icon: '☁️', text: '已同步', color: 'text-gray-400' },
+    syncing: { icon: '🔄', text: '同步中...', color: 'text-blue-500' },
+    synced: { icon: '✅', text: '同步完成', color: 'text-green-500' },
+    error: { icon: '⚠️', text: '同步失败', color: 'text-red-500' }
+  };
+  
+  const s = statusMap[status] || statusMap.idle;
+  el.innerHTML = `<span class="${s.color} text-xs">${s.icon} ${s.text}</span>`;
+  el.title = '云端同步状态';
+}
+
+// 手动同步（先拉后推）
+async function manualSync() {
+  if (!cloudEnabled) {
+    alert('云端同步未启用');
+    return;
+  }
+  
+  if (confirm('将从云端拉取最新数据并与本地合并，是否继续？\n\n（你的本地数据会被云端较新的数据覆盖）')) {
+    const result = await syncFromCloud();
+    if (result.success) {
+      alert('从云端同步成功！正在刷新数据...');
+      await loadBanks();
+      // 如果在刷题页，需要重新加载
+    } else if (result.reason === 'no_data') {
+      alert('云端还没有数据，正在上传本地数据...');
+      await doSyncToCloud();
+    } else if (result.reason === 'local_newer') {
+      alert('本地数据比云端新，正在上传到云端...');
+      await doSyncToCloud();
+    } else {
+      alert('同步失败：' + (result.error?.message || '未知错误'));
+    }
+  }
 }
 
 // ========== 全局状态 ==========
@@ -5808,6 +6053,21 @@ window.addEventListener('resize', () => {
 
 async function init() {
   await openDB();
+  
+  // 初始化云端同步
+  initCloudSync();
+  if (cloudEnabled) {
+    // 先尝试从云端拉取最新数据
+    const result = await syncFromCloud();
+    if (result.success) {
+      console.log('从云端同步数据成功');
+    } else if (result.reason === 'no_data') {
+      // 云端没数据，把本地数据传上去
+      console.log('云端无数据，上传本地数据');
+      syncToCloud();
+    }
+  }
+  
   loadBanks();
   checkOnline();
   updateAIFloatingBtn();
