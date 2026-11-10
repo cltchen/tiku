@@ -16,7 +16,6 @@
 <script src="libs/marked.min.js"></script>
 <link rel="stylesheet" href="libs/katex.min.css">
 <script src="libs/katex.min.js"></script>
-<script src="libs/supabase.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
@@ -955,27 +954,53 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
-// ========== 云端同步（Supabase） ==========
+// ========== 云端同步（Supabase Storage 纯 fetch 版） ==========
 const SUPABASE_URL = 'https://nkscbmongsdstijnubkb.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_-OPF8_GhNFascgJXMnjfzg_yS26Stz5';
-let supabase = null;
+const STORAGE_BUCKET = 'quiz-data';
+const STORAGE_FILE = 'quiz-data.json';
+
 let syncStatus = 'idle'; // idle / syncing / synced / error
 let syncTimer = null;
-let cloudEnabled = false;
-let isSyncingFromCloud = false; // 正在从云端导入时，不要回传
+let cloudEnabled = true; // 纯 fetch 版本，默认启用
+let isSyncingFromCloud = false;
 
-function initCloudSync() {
-  try {
-    if (window.supabase && typeof window.supabase.createClient === 'function') {
-      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-      cloudEnabled = true;
-      return true;
-    }
-  } catch(e) {
-    console.warn('Supabase 初始化失败:', e);
+// 生成 Supabase Storage 请求头
+function getStorageHeaders(extra = {}) {
+  return Object.assign({
+    'apikey': SUPABASE_KEY,
+    'Authorization': 'Bearer ' + SUPABASE_KEY
+  }, extra);
+}
+
+// 上传文件到 Supabase Storage
+async function storageUpload(path, data, contentType = 'application/json') {
+  const url = `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${path}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: getStorageHeaders({ 'Content-Type': contentType, 'x-upsert': 'true' }),
+    body: data
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`上传失败 (${res.status}): ${errText}`);
   }
-  cloudEnabled = false;
-  return false;
+  return await res.json();
+}
+
+// 从 Supabase Storage 下载文件
+async function storageDownload(path) {
+  const url = `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${path}`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: getStorageHeaders()
+  });
+  if (res.status === 404) return null; // 文件不存在
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`下载失败 (${res.status}): ${errText}`);
+  }
+  return await res.text();
 }
 
 // 导出所有数据为一个 JSON 对象
@@ -984,7 +1009,6 @@ async function exportAllData() {
   const questions = await dbGetAll('questions');
   const records = await dbGetAll('records');
   
-  // 收集 localStorage 中的设置
   const settings = {};
   try {
     const keys = ['ai_api_key', 'ai_api_base', 'ai_model', 'aiFabPosition', 'current_page'];
@@ -1008,10 +1032,9 @@ async function exportAllData() {
 async function importAllData(data) {
   if (!data || !data.banks) return false;
   
-  isSyncingFromCloud = true; // 标记：正在从云端导入，不要回传
+  isSyncingFromCloud = true;
   
   try {
-    // 清空现有数据
     const stores = ['banks', 'questions', 'records'];
     for (const store of stores) {
       const tx = db.transaction(store, 'readwrite');
@@ -1023,7 +1046,6 @@ async function importAllData(data) {
       });
     }
     
-    // 写入新数据
     if (data.banks && data.banks.length) {
       for (const item of data.banks) {
         await dbAdd('banks', item).catch(() => dbPut('banks', item));
@@ -1040,7 +1062,6 @@ async function importAllData(data) {
       }
     }
     
-    // 恢复设置
     if (data.settings) {
       for (const [k, v] of Object.entries(data.settings)) {
         try { localStorage.setItem(k, v); } catch(e) {}
@@ -1058,16 +1079,16 @@ async function importAllData(data) {
 
 // 上传数据到云端（防抖）
 function syncToCloud() {
-  if (!cloudEnabled || !supabase || isSyncingFromCloud) return;
+  if (!cloudEnabled || isSyncingFromCloud) return;
   
   if (syncTimer) clearTimeout(syncTimer);
   syncTimer = setTimeout(async () => {
     await doSyncToCloud();
-  }, 2000); // 2秒防抖
+  }, 2000);
 }
 
 async function doSyncToCloud() {
-  if (!cloudEnabled || !supabase) return;
+  if (!cloudEnabled) return;
   
   try {
     updateSyncStatus('syncing');
@@ -1075,17 +1096,11 @@ async function doSyncToCloud() {
     const jsonStr = JSON.stringify(data);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     
-    const { error } = await supabase.storage
-      .from('quiz-data')
-      .upload('quiz-data.json', blob, {
-        contentType: 'application/json',
-        upsert: true
-      });
+    await storageUpload(STORAGE_FILE, blob, 'application/json');
     
-    if (error) throw error;
+    try { localStorage.setItem('cloud_last_sync', data.updatedAt.toString()); } catch(e) {}
+    
     updateSyncStatus('synced');
-    
-    // 3秒后回到 idle 状态
     setTimeout(() => {
       if (syncStatus === 'synced') updateSyncStatus('idle');
     }, 3000);
@@ -1097,38 +1112,30 @@ async function doSyncToCloud() {
 
 // 从云端拉取数据
 async function syncFromCloud() {
-  if (!cloudEnabled || !supabase) return { success: false, reason: 'cloud_disabled' };
+  if (!cloudEnabled) return { success: false, reason: 'cloud_disabled' };
   
   try {
     updateSyncStatus('syncing');
     
-    const { data, error } = await supabase.storage
-      .from('quiz-data')
-      .download('quiz-data.json');
+    const text = await storageDownload(STORAGE_FILE);
     
-    if (error) {
-      if (error.message.includes('not found') || error.statusCode === '404') {
-        // 云端还没有数据，正常
-        updateSyncStatus('idle');
-        return { success: false, reason: 'no_data' };
-      }
-      throw error;
+    if (text === null) {
+      updateSyncStatus('idle');
+      return { success: false, reason: 'no_data' };
     }
     
-    const jsonStr = await data.text();
-    const cloudData = JSON.parse(jsonStr);
+    const cloudData = JSON.parse(text);
     
-    // 比较时间戳
-    const localUpdatedAt = parseInt(localStorage.getItem('cloud_last_sync') || '0');
+    let localUpdatedAt = 0;
+    try { localUpdatedAt = parseInt(localStorage.getItem('cloud_last_sync') || '0') || 0; } catch(e) {}
     const cloudUpdatedAt = cloudData.updatedAt || 0;
     
     updateSyncStatus('idle');
     
     if (cloudUpdatedAt > localUpdatedAt) {
-      // 云端更新，导入
       const ok = await importAllData(cloudData);
       if (ok) {
-        localStorage.setItem('cloud_last_sync', cloudUpdatedAt.toString());
+        try { localStorage.setItem('cloud_last_sync', cloudUpdatedAt.toString()); } catch(e) {}
         return { success: true, data: cloudData };
       }
     }
@@ -1159,7 +1166,7 @@ function updateSyncStatus(status) {
   el.title = '云端同步状态';
 }
 
-// 手动同步（先拉后推）
+// 手动同步
 async function manualSync() {
   if (!cloudEnabled) {
     alert('云端同步未启用');
@@ -1171,7 +1178,6 @@ async function manualSync() {
     if (result.success) {
       alert('从云端同步成功！正在刷新数据...');
       await loadBanks();
-      // 如果在刷题页，需要重新加载
     } else if (result.reason === 'no_data') {
       alert('云端还没有数据，正在上传本地数据...');
       await doSyncToCloud();
@@ -6049,14 +6055,11 @@ async function init() {
   
   // 初始化云端同步（容错：就算云同步挂了也不影响主功能）
   try {
-    initCloudSync();
     if (cloudEnabled) {
-      // 先尝试从云端拉取最新数据
       const result = await syncFromCloud();
       if (result.success) {
         console.log('从云端同步数据成功');
       } else if (result.reason === 'no_data') {
-        // 云端没数据，把本地数据传上去
         console.log('云端无数据，上传本地数据');
         syncToCloud();
       }
