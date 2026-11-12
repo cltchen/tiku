@@ -148,6 +148,7 @@
       </div>
     </nav>
     <div class="p-3 border-t border-gray-100 text-xs text-gray-400">
+      <div id="appVersion" class="text-center text-gray-300 mb-1" style="font-size:11px"></div>
       <div id="cloudSyncStatus" class="flex items-center justify-center gap-1 cursor-pointer hover:text-gray-600 transition" onclick="manualSync()" title="点击手动同步">
         <span class="text-gray-400">☁️ 云端同步</span>
       </div>
@@ -160,17 +161,28 @@
     <!-- 题库管理页面 -->
     <section id="page-banks" class="page p-8 fade-in">
       <div class="max-w-6xl mx-auto">
-        <div class="flex items-center justify-between mb-6">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
           <div>
             <h2 class="text-2xl font-bold text-gray-800">题库管理</h2>
             <p class="text-gray-500 mt-1">导入Excel题库，管理你的学习资料</p>
           </div>
-          <label class="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-500 text-white rounded-lg cursor-pointer hover:bg-blue-600 transition font-medium shadow-sm">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-            导入Excel题库
-            <input type="file" id="fileInput" accept=".xlsx,.xls" class="hidden">
-            <input type="file" id="reimportFileInput" accept=".xlsx,.xls" class="hidden">
-          </label>
+          <div class="flex items-center gap-2 flex-wrap">
+            <button onclick="exportAllData()" class="inline-flex items-center gap-2 px-4 py-2.5 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition font-medium shadow-sm">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+              导出数据
+            </button>
+            <label class="inline-flex items-center gap-2 px-4 py-2.5 bg-white text-gray-700 border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 transition font-medium shadow-sm">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+              导入数据
+              <input type="file" id="dataFileInput" accept=".json" class="hidden">
+            </label>
+            <label class="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-500 text-white rounded-lg cursor-pointer hover:bg-blue-600 transition font-medium shadow-sm">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+              导入Excel题库
+              <input type="file" id="fileInput" accept=".xlsx,.xls" class="hidden">
+              <input type="file" id="reimportFileInput" accept=".xlsx,.xls" class="hidden">
+            </label>
+          </div>
         </div>
 
         <!-- 导入提示 -->
@@ -1025,6 +1037,8 @@ const CLOUD_META_KEY = 'cloud_sync_meta';
 const BANKS_DEBOUNCE_MS = 2000;     // 题库改动：停止 2 秒后上传
 const RECORDS_THROTTLE_MS = 180000; // 记录改动：3 分钟批量上传一次
 
+const APP_VERSION = '云端同步版 v2.1'; // 当前页面版本标识
+
 const MAX_RETRIES = 3;         // 同步失败自动重试次数
 const RETRY_BASE_MS = 10000;   // 重试基础间隔（10s → 20s → 40s 指数退避）
 
@@ -1491,6 +1505,96 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') flushPendingOnExit();
 });
 window.addEventListener('pagehide', () => { flushPendingOnExit(); });
+
+// ========== 数据导出/导入（JSON 备份） ==========
+async function exportAllData() {
+  const banks = await dbGetAll('banks');
+  const questions = await dbGetAll('questions');
+  const records = await dbGetAll('records');
+
+  let practiceProgress = null;
+  let wrongPracticeProgress = null;
+  let activeBank = null;
+  let currentPage = 'banks';
+  try { const raw = localStorage.getItem(PROGRESS_KEY); practiceProgress = raw ? JSON.parse(raw) : null; } catch(e) {}
+  try { const raw = localStorage.getItem(WRONG_PRACTICE_PROGRESS_KEY); wrongPracticeProgress = raw ? JSON.parse(raw) : null; } catch(e) {}
+  try { activeBank = localStorage.getItem('practice_active_bank'); } catch(e) {}
+  try { currentPage = localStorage.getItem('current_page') || 'banks'; } catch(e) {}
+
+  // 明确排除 ai_settings（含 API Key），备份文件绝不包含密钥
+  const payload = {
+    app: 'quiz-helper',
+    schemaVersion: 1,
+    exportedAt: Date.now(),
+    banks,
+    questions,
+    records,
+    practiceProgress,
+    wrongPracticeProgress,
+    activeBank,
+    currentPage
+  };
+
+  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'quiz-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function importAllData(file) {
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!data || data.app !== 'quiz-helper' || !Array.isArray(data.banks)) {
+      alert('无效的备份文件');
+      return;
+    }
+    const qCount = (data.questions || []).length;
+    const rCount = (data.records || []).length;
+    if (!confirm(`将覆盖现有数据并导入备份：${data.banks.length} 个题库、${qCount} 道题、${rCount} 条记录，是否继续？`)) return;
+
+    isSyncingFromCloud = true; // 导入期间暂停自动同步，避免中间态上传
+    try {
+      for (const store of ['banks', 'questions', 'records']) {
+        const tx = db.transaction(store, 'readwrite');
+        tx.objectStore(store).clear();
+        await new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); });
+      }
+      for (const item of (data.banks || [])) await dbAdd('banks', item).catch(() => dbPut('banks', item));
+      for (const item of (data.questions || [])) await dbAdd('questions', item).catch(() => dbPut('questions', item));
+      for (const item of (data.records || [])) await dbAdd('records', item).catch(() => dbPut('records', item));
+
+      if (data.practiceProgress != null) localStorage.setItem(PROGRESS_KEY, JSON.stringify(data.practiceProgress)); else localStorage.removeItem(PROGRESS_KEY);
+      if (data.wrongPracticeProgress != null) localStorage.setItem(WRONG_PRACTICE_PROGRESS_KEY, JSON.stringify(data.wrongPracticeProgress)); else localStorage.removeItem(WRONG_PRACTICE_PROGRESS_KEY);
+      if (data.activeBank) localStorage.setItem('practice_active_bank', data.activeBank); else localStorage.removeItem('practice_active_bank');
+      if (data.currentPage) localStorage.setItem('current_page', data.currentPage);
+    } finally {
+      isSyncingFromCloud = false;
+    }
+
+    // 导入后立即上传到云端
+    await doSyncBanksToCloud();
+    await doSyncRecordsToCloud();
+
+    alert('导入成功，并已上传到云端');
+    location.reload();
+  } catch(e) {
+    console.error('导入数据失败:', e);
+    alert('导入失败：' + e.message);
+  }
+}
+
+document.getElementById('dataFileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  await importAllData(file);
+  e.target.value = '';
+});
 
 // ========== 全局状态 ==========
 const state = {
@@ -6388,6 +6492,8 @@ window.addEventListener('resize', () => {
 async function init() {
   await openDB();
   refreshSyncBadge();
+  const verEl = document.getElementById('appVersion');
+  if (verEl) verEl.textContent = APP_VERSION;
   
   // 初始化云端同步（容错：就算云同步挂了也不影响主功能）
   try {
