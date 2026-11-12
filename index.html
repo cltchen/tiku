@@ -66,13 +66,67 @@
   .explain-md li { margin: 3px 0; }
   .explain-md strong { font-weight: 600; }
   .explain-md .katex-display { margin: 8px 0; overflow-x: auto; overflow-y: hidden; }
+  /* ===== 移动端响应式适配 ===== */
+  #sidebar { transition: transform 0.25s ease; }
+  #mobileTopBar { display: none; }
+  #sidebarOverlay { display: none; }
+  @media (max-width: 767px) {
+    #mobileTopBar {
+      display: flex;
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 48px;
+      background: #fff;
+      border-bottom: 1px solid #e5e7eb;
+      align-items: center;
+      padding: 0 12px;
+      z-index: 30;
+    }
+    #app { padding-top: 48px; }
+    #sidebar {
+      position: fixed;
+      left: 0; top: 0; bottom: 0;
+      width: 240px;
+      z-index: 50;
+      transform: translateX(-100%);
+      box-shadow: none;
+    }
+    #sidebar.open { transform: translateX(0); box-shadow: 4px 0 24px rgba(0,0,0,0.15); }
+    #sidebarOverlay {
+      display: block;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 45;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+    #sidebarOverlay.show { opacity: 1; pointer-events: auto; }
+    .page { padding: 16px !important; }
+    /* 移动端按钮、卡片微调 */
+    .grid.md\:grid-cols-2, .grid.lg\:grid-cols-3 { grid-template-columns: 1fr !important; }
+  }
 </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
+
+  <!-- 移动端顶栏 -->
+  <header id="mobileTopBar">
+    <button id="mobileMenuBtn" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-600 hover:bg-gray-100" onclick="toggleSidebar()" aria-label="打开菜单">
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+    <span class="ml-2 font-bold text-gray-800 text-base">题库刷题助手</span>
+    <div id="cloudSyncStatusMobile" class="ml-auto cursor-pointer" onclick="manualSync()" title="点击手动同步"></div>
+  </header>
+
 <div id="app" class="flex h-screen">
 
+  <!-- 侧边栏抽屉遮罩 -->
+  <div id="sidebarOverlay" onclick="closeSidebar()"></div>
+
   <!-- 侧边栏 -->
-  <aside class="w-60 bg-white border-r border-gray-200 flex flex-col shadow-sm flex-shrink-0">
+  <aside id="sidebar" class="w-60 bg-white border-r border-gray-200 flex flex-col shadow-sm flex-shrink-0">
     <div class="p-5 border-b border-gray-100">
       <h1 class="text-xl font-bold text-gray-800 flex items-center gap-2">
         <svg class="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
@@ -858,7 +912,10 @@ function dbAdd(storeName, data) {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     const req = store.add(data);
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      resolve(req.result);
+      markDirtyByStore(storeName);
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -868,7 +925,10 @@ function dbPut(storeName, data) {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
     const req = store.put(data);
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      resolve(req.result);
+      markDirtyByStore(storeName);
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -911,7 +971,7 @@ function dbDelete(storeName, key) {
     const req = store.delete(key);
     req.onsuccess = () => {
       resolve();
-      syncToCloud();
+      markDirtyByStore(storeName);
     };
     req.onerror = () => reject(req.error);
   });
@@ -930,7 +990,7 @@ function dbDeleteByIndex(storeName, indexName, value) {
         cursor.continue();
       } else {
         resolve();
-        syncToCloud();
+        markDirtyByStore(storeName);
       }
     };
     req.onerror = () => reject(req.error);
@@ -944,7 +1004,7 @@ function dbAddBatch(storeName, dataList) {
     dataList.forEach(item => store.add(item));
     tx.oncomplete = () => {
       resolve();
-      syncToCloud();
+      markDirtyByStore(storeName);
     };
     tx.onerror = () => reject(tx.error);
   });
@@ -954,16 +1014,50 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
-// ========== 云端同步（Supabase Storage 纯 fetch 版） ==========
+// ========== 云端同步（Supabase Storage 纯 fetch 版，分文件存储） ==========
 const SUPABASE_URL = 'https://nkscbmongsdstijnubkb.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_-OPF8_GhNFascgJXMnjfzg_yS26Stz5';
 const STORAGE_BUCKET = 'quiz-data';
-const STORAGE_FILE = 'quiz-data.json';
+const BANKS_FILE = 'quiz-banks.json';     // 题库+题目（大而稳定，低频）
+const RECORDS_FILE = 'quiz-records.json'; // 记录+进度+设置（小而频繁）
+const CLOUD_META_KEY = 'cloud_sync_meta';
 
-let syncStatus = 'idle'; // idle / syncing / synced / error
-let syncTimer = null;
+const BANKS_DEBOUNCE_MS = 2000;     // 题库改动：停止 2 秒后上传
+const RECORDS_THROTTLE_MS = 180000; // 记录改动：3 分钟批量上传一次
+
+const MAX_RETRIES = 3;         // 同步失败自动重试次数
+const RETRY_BASE_MS = 10000;   // 重试基础间隔（10s → 20s → 40s 指数退避）
+
 let cloudEnabled = true; // 纯 fetch 版本，默认启用
 let isSyncingFromCloud = false;
+
+const syncState = {
+  banks:   { status: 'idle', timer: null, retryTimer: null, dirty: false, retryCount: 0, lastError: '' },
+  records: { status: 'idle', timer: null, retryTimer: null, dirty: false, retryCount: 0, lastError: '' }
+};
+
+// 分类同步错误类型，用于差异化提示
+function classifySyncError(e) {
+  const msg = (e && e.message) ? String(e.message) : String(e);
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return { type: 'offline', message: '未连接网络，请连接后重试' };
+  if (/401|403/.test(msg)) return { type: 'auth', message: '云端权限校验失败' };
+  if (/404/.test(msg)) return { type: 'missing', message: '云端文件不存在' };
+  if (/50[0-9]/.test(msg)) return { type: 'server', message: '云端服务暂不可用' };
+  if (e && e.name === 'SyntaxError') return { type: 'parse', message: '云端数据解析失败' };
+  if (e && e.name === 'TypeError' || /fetch|network|Failed to fetch/i.test(msg)) return { type: 'network', message: '网络请求失败' };
+  return { type: 'unknown', message: '同步失败，点击重试' };
+}
+
+function getCloudMeta() {
+  try {
+    const m = localStorage.getItem(CLOUD_META_KEY);
+    if (m) return JSON.parse(m);
+  } catch(e) {}
+  return { banks: { lastModified: 0 }, records: { lastModified: 0 } };
+}
+function setCloudMeta(meta) {
+  try { localStorage.setItem(CLOUD_META_KEY, JSON.stringify(meta)); } catch(e) {}
+}
 
 // 生成 Supabase Storage 请求头
 function getStorageHeaders(extra = {}) {
@@ -1003,167 +1097,294 @@ async function storageDownload(path) {
   return await res.text();
 }
 
-// 导出所有数据为一个 JSON 对象
-async function exportAllData() {
+// 导出题库数据（题库 + 题目）
+async function exportBanksData() {
   const banks = await dbGetAll('banks');
   const questions = await dbGetAll('questions');
+  return { version: 1, updatedAt: Date.now(), banks, questions };
+}
+
+// 导出记录数据（答题记录 + 进度 + 设置）
+async function exportRecordsData() {
   const records = await dbGetAll('records');
   
+  let practiceProgress = null;
+  let wrongPracticeProgress = null;
+  try { practiceProgress = JSON.parse(localStorage.getItem('quiz_practice_progress') || 'null'); } catch(e) {}
+  try { wrongPracticeProgress = JSON.parse(localStorage.getItem('ti_ku_wrong_practice_progress_v1') || 'null'); } catch(e) {}
+  
+  // 注意：不同步 ai_api_key（安全），Key 只在各设备本地保存
   const settings = {};
   try {
-    const keys = ['ai_api_key', 'ai_api_base', 'ai_model', 'aiFabPosition', 'current_page'];
+    const keys = ['ai_api_base', 'ai_model', 'aiFabPosition', 'current_page'];
     keys.forEach(k => {
       const v = localStorage.getItem(k);
       if (v) settings[k] = v;
     });
   } catch(e) {}
   
-  return {
-    version: 1,
-    updatedAt: Date.now(),
-    banks,
-    questions,
-    records,
-    settings
-  };
+  return { version: 1, updatedAt: Date.now(), records, practiceProgress, wrongPracticeProgress, settings };
 }
 
-// 导入 JSON 数据到本地
-async function importAllData(data) {
+// 导入题库数据到本地（清空后写入，避免重复）
+async function importBanksData(data) {
   if (!data || !data.banks) return false;
-  
   isSyncingFromCloud = true;
-  
   try {
-    const stores = ['banks', 'questions', 'records'];
-    for (const store of stores) {
+    for (const store of ['banks', 'questions']) {
       const tx = db.transaction(store, 'readwrite');
-      const storeObj = tx.objectStore(store);
-      storeObj.clear();
+      tx.objectStore(store).clear();
       await new Promise((resolve, reject) => {
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
       });
     }
-    
-    if (data.banks && data.banks.length) {
-      for (const item of data.banks) {
-        await dbAdd('banks', item).catch(() => dbPut('banks', item));
-      }
+    for (const item of (data.banks || [])) {
+      await dbAdd('banks', item).catch(() => dbPut('banks', item));
     }
-    if (data.questions && data.questions.length) {
-      for (const item of data.questions) {
-        await dbAdd('questions', item).catch(() => dbPut('questions', item));
-      }
+    for (const item of (data.questions || [])) {
+      await dbAdd('questions', item).catch(() => dbPut('questions', item));
     }
-    if (data.records && data.records.length) {
-      for (const item of data.records) {
-        await dbAdd('records', item).catch(() => dbPut('records', item));
-      }
-    }
-    
-    if (data.settings) {
-      for (const [k, v] of Object.entries(data.settings)) {
-        try { localStorage.setItem(k, v); } catch(e) {}
-      }
-    }
-    
     return true;
   } catch(e) {
-    console.error('导入数据失败:', e);
+    console.error('导入题库数据失败:', e);
     return false;
   } finally {
     setTimeout(() => { isSyncingFromCloud = false; }, 500);
   }
 }
 
-// 上传数据到云端（防抖）
-function syncToCloud() {
-  if (!cloudEnabled || isSyncingFromCloud) return;
-  
-  if (syncTimer) clearTimeout(syncTimer);
-  syncTimer = setTimeout(async () => {
-    await doSyncToCloud();
-  }, 2000);
-}
-
-async function doSyncToCloud() {
-  if (!cloudEnabled) return;
-  
+// 导入记录数据到本地
+async function importRecordsData(data) {
+  if (!data) return false;
+  isSyncingFromCloud = true;
   try {
-    updateSyncStatus('syncing');
-    const data = await exportAllData();
-    const jsonStr = JSON.stringify(data);
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    
-    await storageUpload(STORAGE_FILE, blob, 'application/json');
-    
-    try { localStorage.setItem('cloud_last_sync', data.updatedAt.toString()); } catch(e) {}
-    
-    updateSyncStatus('synced');
-    setTimeout(() => {
-      if (syncStatus === 'synced') updateSyncStatus('idle');
-    }, 3000);
-  } catch(e) {
-    console.error('同步到云端失败:', e);
-    updateSyncStatus('error');
-  }
-}
-
-// 从云端拉取数据
-async function syncFromCloud() {
-  if (!cloudEnabled) return { success: false, reason: 'cloud_disabled' };
-  
-  try {
-    updateSyncStatus('syncing');
-    
-    const text = await storageDownload(STORAGE_FILE);
-    
-    if (text === null) {
-      updateSyncStatus('idle');
-      return { success: false, reason: 'no_data' };
+    const tx = db.transaction('records', 'readwrite');
+    tx.objectStore('records').clear();
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    for (const item of (data.records || [])) {
+      await dbAdd('records', item).catch(() => dbPut('records', item));
     }
     
-    const cloudData = JSON.parse(text);
-    
-    let localUpdatedAt = 0;
-    try { localUpdatedAt = parseInt(localStorage.getItem('cloud_last_sync') || '0') || 0; } catch(e) {}
-    const cloudUpdatedAt = cloudData.updatedAt || 0;
-    
-    updateSyncStatus('idle');
-    
-    if (cloudUpdatedAt > localUpdatedAt) {
-      const ok = await importAllData(cloudData);
-      if (ok) {
-        try { localStorage.setItem('cloud_last_sync', cloudUpdatedAt.toString()); } catch(e) {}
-        return { success: true, data: cloudData };
+    if (data.practiceProgress) { try { localStorage.setItem('quiz_practice_progress', JSON.stringify(data.practiceProgress)); } catch(e) {} }
+    if (data.wrongPracticeProgress) { try { localStorage.setItem('ti_ku_wrong_practice_progress_v1', JSON.stringify(data.wrongPracticeProgress)); } catch(e) {} }
+    if (data.settings) {
+      for (const [k, v] of Object.entries(data.settings)) {
+        try { localStorage.setItem(k, v); } catch(e) {}
       }
     }
-    
-    return { success: false, reason: 'local_newer' };
+    return true;
   } catch(e) {
-    console.error('从云端同步失败:', e);
-    updateSyncStatus('error');
-    return { success: false, reason: 'error', error: e };
+    console.error('导入记录数据失败:', e);
+    return false;
+  } finally {
+    setTimeout(() => { isSyncingFromCloud = false; }, 500);
   }
 }
 
-// 更新同步状态显示
-function updateSyncStatus(status) {
-  syncStatus = status;
-  const el = document.getElementById('cloudSyncStatus');
-  if (!el) return;
+// 根据 store 名分流同步触发（在数据写入时调用）
+function markDirtyByStore(storeName) {
+  if (!cloudEnabled || isSyncingFromCloud) return;
+  if (storeName === 'banks' || storeName === 'questions') {
+    scheduleBanksSync();
+  } else if (storeName === 'records') {
+    scheduleRecordsSync();
+  }
+}
+
+// 标记进度类改动（localStorage），走记录文件同步
+function markRecordsDirty() {
+  if (!cloudEnabled || isSyncingFromCloud) return;
+  scheduleRecordsSync();
+}
+
+// 题库同步：防抖 2 秒
+function scheduleBanksSync() {
+  if (!cloudEnabled || isSyncingFromCloud) return;
+  syncState.banks.dirty = true;
+  refreshSyncBadge();
+  if (syncState.banks.timer) clearTimeout(syncState.banks.timer);
+  syncState.banks.timer = setTimeout(() => {
+    syncState.banks.timer = null;
+    doSyncBanksToCloud();
+  }, BANKS_DEBOUNCE_MS);
+}
+
+// 记录同步：节流 3 分钟
+function scheduleRecordsSync() {
+  if (!cloudEnabled || isSyncingFromCloud) return;
+  syncState.records.dirty = true;
+  refreshSyncBadge();
+  if (syncState.records.timer) return;
+  syncState.records.timer = setTimeout(() => {
+    syncState.records.timer = null;
+    doSyncRecordsToCloud();
+  }, RECORDS_THROTTLE_MS);
+}
+
+async function doSyncBanksToCloud() {
+  if (!cloudEnabled) return;
+  try {
+    updateSyncStatus('banks', 'syncing');
+    const data = await exportBanksData();
+    await storageUpload(BANKS_FILE, JSON.stringify(data), 'application/json');
+    syncState.banks.dirty = false;
+    syncState.banks.retryCount = 0;
+    syncState.banks.lastError = '';
+    const meta = getCloudMeta();
+    meta.banks.lastModified = data.updatedAt;
+    setCloudMeta(meta);
+    updateSyncStatus('banks', 'synced');
+    setTimeout(() => { if (syncState.banks.status === 'synced') updateSyncStatus('banks', 'idle'); }, 3000);
+  } catch(e) {
+    console.error('同步题库到云端失败:', e);
+    const err = classifySyncError(e);
+    syncState.banks.lastError = err.message;
+    updateSyncStatus('banks', 'error');
+    if (cloudEnabled && syncState.banks.retryCount < MAX_RETRIES) {
+      syncState.banks.retryCount++;
+      scheduleRetry('banks', syncState.banks.retryCount);
+    }
+  }
+}
+
+async function doSyncRecordsToCloud() {
+  if (!cloudEnabled) return;
+  try {
+    updateSyncStatus('records', 'syncing');
+    const data = await exportRecordsData();
+    await storageUpload(RECORDS_FILE, JSON.stringify(data), 'application/json');
+    syncState.records.dirty = false;
+    syncState.records.retryCount = 0;
+    syncState.records.lastError = '';
+    const meta = getCloudMeta();
+    meta.records.lastModified = data.updatedAt;
+    setCloudMeta(meta);
+    updateSyncStatus('records', 'synced');
+    setTimeout(() => { if (syncState.records.status === 'synced') updateSyncStatus('records', 'idle'); }, 3000);
+  } catch(e) {
+    console.error('同步记录到云端失败:', e);
+    const err = classifySyncError(e);
+    syncState.records.lastError = err.message;
+    updateSyncStatus('records', 'error');
+    if (cloudEnabled && syncState.records.retryCount < MAX_RETRIES) {
+      syncState.records.retryCount++;
+      scheduleRetry('records', syncState.records.retryCount);
+    }
+  }
+}
+
+// 同步失败自动重试（指数退避：10s → 20s → 40s）
+function scheduleRetry(file, attempt) {
+  if (!cloudEnabled) return;
+  const fn = file === 'banks' ? doSyncBanksToCloud : doSyncRecordsToCloud;
+  const delay = RETRY_BASE_MS * Math.pow(2, attempt - 1);
+  if (syncState[file].retryTimer) clearTimeout(syncState[file].retryTimer);
+  syncState[file].retryTimer = setTimeout(() => {
+    syncState[file].retryTimer = null;
+    fn();
+  }, delay);
+}
+
+// 从云端拉取数据（最后修改时间优先）
+async function syncFromCloud() {
+  if (!cloudEnabled) return { success: false, reason: 'cloud_disabled' };
+  const meta = getCloudMeta();
+  let anySuccess = false;
+  let noData = true;
+  
+  // 拉取题库文件
+  try {
+    updateSyncStatus('banks', 'syncing');
+    const text = await storageDownload(BANKS_FILE);
+    if (text !== null) {
+      noData = false;
+      const data = JSON.parse(text);
+      if ((data.updatedAt || 0) > meta.banks.lastModified) {
+        const ok = await importBanksData(data);
+        if (ok) { meta.banks.lastModified = data.updatedAt; setCloudMeta(meta); anySuccess = true; }
+      }
+      updateSyncStatus('banks', 'idle');
+    } else {
+      updateSyncStatus('banks', 'idle');
+    }
+  } catch(e) {
+    console.error('从云端拉取题库失败:', e);
+    updateSyncStatus('banks', 'error');
+  }
+  
+  // 拉取记录文件
+  try {
+    updateSyncStatus('records', 'syncing');
+    const text = await storageDownload(RECORDS_FILE);
+    if (text !== null) {
+      noData = false;
+      const data = JSON.parse(text);
+      if ((data.updatedAt || 0) > meta.records.lastModified) {
+        const ok = await importRecordsData(data);
+        if (ok) { meta.records.lastModified = data.updatedAt; setCloudMeta(meta); anySuccess = true; }
+      }
+      updateSyncStatus('records', 'idle');
+    } else {
+      updateSyncStatus('records', 'idle');
+    }
+  } catch(e) {
+    console.error('从云端拉取记录失败:', e);
+    updateSyncStatus('records', 'error');
+  }
+  
+  if (noData) return { success: false, reason: 'no_data' };
+  return { success: anySuccess, reason: anySuccess ? 'ok' : 'local_newer' };
+}
+
+// 更新同步状态显示（按文件 + 综合）
+function updateSyncStatus(file, status) {
+  if (file && syncState[file]) syncState[file].status = status;
+  refreshSyncBadge();
+}
+
+// 综合刷新同步状态徽标（桌面侧边栏 + 移动端顶栏）
+function refreshSyncBadge() {
+  const banks = syncState.banks;
+  const records = syncState.records;
+  
+  const anyError = banks.status === 'error' || records.status === 'error';
+  const anySyncing = banks.status === 'syncing' || records.status === 'syncing';
+  const anyDirty = banks.dirty || records.dirty;
+  const anySynced = banks.status === 'synced' || records.status === 'synced';
+  
+  let overall = 'idle';
+  let detail = '';
+  if (anyError) {
+    overall = 'error';
+    detail = (banks.status === 'error' ? banks.lastError : records.lastError) || '同步失败';
+  } else if (anySyncing) {
+    overall = 'syncing';
+  } else if (anyDirty) {
+    overall = 'dirty';
+  } else if (anySynced) {
+    overall = 'synced';
+  }
   
   const statusMap = {
-    idle: { icon: '☁️', text: '已同步', color: 'text-gray-400' },
-    syncing: { icon: '🔄', text: '同步中...', color: 'text-blue-500' },
-    synced: { icon: '✅', text: '同步完成', color: 'text-green-500' },
-    error: { icon: '⚠️', text: '同步失败', color: 'text-red-500' }
+    idle:    { icon: '☁️', text: '已同步', color: '#9ca3af' },
+    syncing: { icon: '🔄', text: '同步中…', color: '#3b82f6' },
+    synced:  { icon: '✅', text: '同步完成', color: '#22c55e' },
+    dirty:   { icon: '⏳', text: '有改动待同步', color: '#f59e0b' },
+    error:   { icon: '⚠️', text: '同步失败·点此重试', color: '#ef4444' }
   };
+  const s = statusMap[overall] || statusMap.idle;
+  const tip = (overall === 'error' && detail) ? `（${detail}）` : '';
+  const html = `<span style="color:${s.color};font-size:12px">${s.icon} ${s.text}${tip}</span>`;
+  const title = overall === 'error' ? (detail || '点击重试') : '点击手动同步';
   
-  const s = statusMap[status] || statusMap.idle;
-  el.innerHTML = `<span class="${s.color} text-xs">${s.icon} ${s.text}</span>`;
-  el.title = '云端同步状态';
+  const desktopEl = document.getElementById('cloudSyncStatus');
+  if (desktopEl) { desktopEl.innerHTML = html; desktopEl.title = title; }
+  const mobileEl = document.getElementById('cloudSyncStatusMobile');
+  if (mobileEl) { mobileEl.innerHTML = html; mobileEl.title = title; }
 }
 
 // 手动同步
@@ -1172,23 +1393,104 @@ async function manualSync() {
     alert('云端同步未启用');
     return;
   }
+  if (!confirm('将同步题库和答题记录数据，是否继续？')) return;
   
-  if (confirm('将从云端拉取最新数据并与本地合并，是否继续？\n\n（你的本地数据会被云端较新的数据覆盖）')) {
-    const result = await syncFromCloud();
-    if (result.success) {
-      alert('从云端同步成功！正在刷新数据...');
-      await loadBanks();
-    } else if (result.reason === 'no_data') {
-      alert('云端还没有数据，正在上传本地数据...');
-      await doSyncToCloud();
-    } else if (result.reason === 'local_newer') {
-      alert('本地数据比云端新，正在上传到云端...');
-      await doSyncToCloud();
+  const meta = getCloudMeta();
+  
+  let banksMsg = '无变化';
+  try {
+    const text = await storageDownload(BANKS_FILE);
+    if (text === null) {
+      await doSyncBanksToCloud();
+      banksMsg = '已上传本地';
     } else {
-      alert('同步失败：' + (result.error?.message || '未知错误'));
+      const data = JSON.parse(text);
+      if ((data.updatedAt || 0) > meta.banks.lastModified) {
+        await importBanksData(data);
+        meta.banks.lastModified = data.updatedAt; setCloudMeta(meta);
+        banksMsg = '已从云端更新';
+      } else if (syncState.banks.dirty) {
+        await doSyncBanksToCloud();
+        banksMsg = '已上传本地';
+      } else {
+        banksMsg = '已是最新';
+      }
     }
+  } catch(e) { console.error(e); banksMsg = '失败'; syncState.banks.lastError = classifySyncError(e).message; updateSyncStatus('banks', 'error'); }
+  
+  let recordsMsg = '无变化';
+  try {
+    const text = await storageDownload(RECORDS_FILE);
+    if (text === null) {
+      await doSyncRecordsToCloud();
+      recordsMsg = '已上传本地';
+    } else {
+      const data = JSON.parse(text);
+      if ((data.updatedAt || 0) > meta.records.lastModified) {
+        await importRecordsData(data);
+        meta.records.lastModified = data.updatedAt; setCloudMeta(meta);
+        recordsMsg = '已从云端更新';
+      } else if (syncState.records.dirty) {
+        await doSyncRecordsToCloud();
+        recordsMsg = '已上传本地';
+      } else {
+        recordsMsg = '已是最新';
+      }
+    }
+  } catch(e) { console.error(e); recordsMsg = '失败'; syncState.records.lastError = classifySyncError(e).message; updateSyncStatus('records', 'error'); }
+  
+  await loadBanks();
+  alert(`同步完成\n题库：${banksMsg}\n记录：${recordsMsg}`);
+}
+
+// ========== 未同步改动检测 + 退出提醒 ==========
+function hasUnsyncedChanges() {
+  return !!(syncState.banks.dirty || syncState.records.dirty);
+}
+
+// 关闭/刷新页面前，若有未同步改动则提示
+window.addEventListener('beforeunload', (e) => {
+  if (!cloudEnabled) return;
+  if (hasUnsyncedChanges()) {
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
+  }
+});
+
+// 页面隐藏/退出时，用 keepalive 尽力上传一次未同步数据，降低丢失风险
+async function flushPendingOnExit() {
+  if (!cloudEnabled) return;
+  try {
+    if (syncState.banks.dirty) {
+      const data = await exportBanksData();
+      await fetch(`${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${BANKS_FILE}`, {
+        method: 'POST',
+        headers: getStorageHeaders({ 'Content-Type': 'application/json', 'x-upsert': 'true' }),
+        body: JSON.stringify(data),
+        keepalive: true
+      });
+      syncState.banks.dirty = false;
+    }
+    if (syncState.records.dirty) {
+      const data = await exportRecordsData();
+      await fetch(`${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${RECORDS_FILE}`, {
+        method: 'POST',
+        headers: getStorageHeaders({ 'Content-Type': 'application/json', 'x-upsert': 'true' }),
+        body: JSON.stringify(data),
+        keepalive: true
+      });
+      syncState.records.dirty = false;
+    }
+  } catch(e) {
+    // 退出时的尽力上传，失败不打扰用户
   }
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushPendingOnExit();
+});
+window.addEventListener('pagehide', () => { flushPendingOnExit(); });
 
 // ========== 全局状态 ==========
 const state = {
@@ -2752,6 +3054,7 @@ function savePracticeProgress() {
     }
   }
   saveAllProgressList(list);
+  markRecordsDirty();
 }
 
 function loadPracticeProgress() {
@@ -2773,6 +3076,7 @@ function clearPracticeProgress(bankId) {
       localStorage.removeItem(PROGRESS_KEY);
     }
   } catch (e) {}
+  markRecordsDirty();
 }
 
 // ========== 错题专刷进度保存 ==========
@@ -2797,6 +3101,7 @@ function saveWrongPracticeProgress() {
   try {
     localStorage.setItem(WRONG_PRACTICE_PROGRESS_KEY, JSON.stringify(progress));
   } catch (e) {}
+  markRecordsDirty();
 }
 
 function loadWrongPracticeProgress() {
@@ -2813,6 +3118,7 @@ function clearWrongPracticeProgress() {
   try {
     localStorage.removeItem(WRONG_PRACTICE_PROGRESS_KEY);
   } catch (e) {}
+  markRecordsDirty();
 }
 
 // ========== 刷题功能 ==========
@@ -5899,7 +6205,36 @@ function saveAISettings() {
 
 // ========== 初始化 ==========
 document.querySelectorAll('.nav-item').forEach(item => {
-  item.addEventListener('click', () => switchPage(item.dataset.page));
+  item.addEventListener('click', () => {
+    switchPage(item.dataset.page);
+    closeSidebar();
+  });
+});
+
+// ====== 移动端侧边栏抽屉控制 ======
+function toggleSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const overlay = document.getElementById('sidebarOverlay');
+  const isOpen = sidebar.classList.contains('open');
+  if (isOpen) {
+    closeSidebar();
+  } else {
+    sidebar.classList.add('open');
+    overlay.classList.add('show');
+  }
+}
+
+function closeSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const overlay = document.getElementById('sidebarOverlay');
+  if (!sidebar) return;
+  sidebar.classList.remove('open');
+  if (overlay) overlay.classList.remove('show');
+}
+
+// 窗口变大到桌面尺寸时，收起移动端抽屉
+window.addEventListener('resize', () => {
+  if (window.innerWidth >= 768) closeSidebar();
 });
 
 // ====== AI 悬浮球拖拽 ======
@@ -6052,6 +6387,7 @@ window.addEventListener('resize', () => {
 
 async function init() {
   await openDB();
+  refreshSyncBadge();
   
   // 初始化云端同步（容错：就算云同步挂了也不影响主功能）
   try {
@@ -6061,13 +6397,15 @@ async function init() {
         console.log('从云端同步数据成功');
       } else if (result.reason === 'no_data') {
         console.log('云端无数据，上传本地数据');
-        syncToCloud();
+        doSyncBanksToCloud();
+        doSyncRecordsToCloud();
       }
     }
   } catch(e) {
     console.warn('云端同步初始化失败，继续使用本地模式:', e);
     cloudEnabled = false;
-    updateSyncStatus('idle');
+    updateSyncStatus('banks', 'idle');
+    updateSyncStatus('records', 'idle');
   }
   
   loadBanks();
