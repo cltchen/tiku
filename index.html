@@ -1034,10 +1034,12 @@ const BANKS_FILE = 'quiz-banks.json';     // 题库+题目（大而稳定，低�
 const RECORDS_FILE = 'quiz-records.json'; // 记录+进度+设置（小而频繁）
 const CLOUD_META_KEY = 'cloud_sync_meta';
 
-const BANKS_DEBOUNCE_MS = 2000;     // 题库改动：停止 2 秒后上传
-const RECORDS_THROTTLE_MS = 180000; // 记录改动：3 分钟批量上传一次
+const BANKS_DEBOUNCE_MS = 120000;   // 题库改动：停止操作 2 分钟后才上传（题库极少变动）
+const BANKS_MAX_WAIT_MS = 600000;   // 题库持续改动时，最多累计 10 分钟强制上传一次
+const RECORDS_THROTTLE_MS = 300000; // 记录改动：5 分钟批量上传一次
+const EXIT_FLUSH_MIN_AGE_MS = 60000; // 切到后台时，改动不足 1 分钟不触发上传（避免频繁切换 App 反复上传）
 
-const APP_VERSION = '云端同步版 v2.1'; // 当前页面版本标识
+const APP_VERSION = '云端同步版 v2.2'; // 当前页面版本标识
 
 const MAX_RETRIES = 3;         // 同步失败自动重试次数
 const RETRY_BASE_MS = 10000;   // 重试基础间隔（10s → 20s → 40s 指数退避）
@@ -1046,8 +1048,8 @@ let cloudEnabled = true; // 纯 fetch 版本，默认启用
 let isSyncingFromCloud = false;
 
 const syncState = {
-  banks:   { status: 'idle', timer: null, retryTimer: null, dirty: false, retryCount: 0, lastError: '' },
-  records: { status: 'idle', timer: null, retryTimer: null, dirty: false, retryCount: 0, lastError: '' }
+  banks:   { status: 'idle', timer: null, retryTimer: null, dirty: false, firstDirtyAt: 0, retryCount: 0, lastError: '' },
+  records: { status: 'idle', timer: null, retryTimer: null, dirty: false, firstDirtyAt: 0, retryCount: 0, lastError: '' }
 };
 
 // 分类同步错误类型，用于差异化提示
@@ -1215,21 +1217,25 @@ function markRecordsDirty() {
   scheduleRecordsSync();
 }
 
-// 题库同步：防抖 2 秒
+// 题库同步：空闲 2 分钟防抖 + 最长 10 分钟强制上传
 function scheduleBanksSync() {
   if (!cloudEnabled || isSyncingFromCloud) return;
+  if (!syncState.banks.dirty) syncState.banks.firstDirtyAt = Date.now();
   syncState.banks.dirty = true;
   refreshSyncBadge();
   if (syncState.banks.timer) clearTimeout(syncState.banks.timer);
+  const waited = Date.now() - syncState.banks.firstDirtyAt;
+  const delay = Math.max(0, Math.min(BANKS_DEBOUNCE_MS, BANKS_MAX_WAIT_MS - waited));
   syncState.banks.timer = setTimeout(() => {
     syncState.banks.timer = null;
     doSyncBanksToCloud();
-  }, BANKS_DEBOUNCE_MS);
+  }, delay);
 }
 
-// 记录同步：节流 3 分钟
+// 记录同步：节流 5 分钟
 function scheduleRecordsSync() {
   if (!cloudEnabled || isSyncingFromCloud) return;
+  if (!syncState.records.dirty) syncState.records.firstDirtyAt = Date.now();
   syncState.records.dirty = true;
   refreshSyncBadge();
   if (syncState.records.timer) return;
@@ -1246,6 +1252,7 @@ async function doSyncBanksToCloud() {
     const data = await exportBanksData();
     await storageUpload(BANKS_FILE, JSON.stringify(data), 'application/json');
     syncState.banks.dirty = false;
+    syncState.banks.firstDirtyAt = 0;
     syncState.banks.retryCount = 0;
     syncState.banks.lastError = '';
     const meta = getCloudMeta();
@@ -1272,6 +1279,7 @@ async function doSyncRecordsToCloud() {
     const data = await exportRecordsData();
     await storageUpload(RECORDS_FILE, JSON.stringify(data), 'application/json');
     syncState.records.dirty = false;
+    syncState.records.firstDirtyAt = 0;
     syncState.records.retryCount = 0;
     syncState.records.lastError = '';
     const meta = getCloudMeta();
@@ -1308,49 +1316,50 @@ async function syncFromCloud() {
   if (!cloudEnabled) return { success: false, reason: 'cloud_disabled' };
   const meta = getCloudMeta();
   let anySuccess = false;
-  let noData = true;
-  
+  let anyData = false;        // 云端确实存在数据文件
+  let remoteUnavailable = false; // 至少一个文件请求异常（网络/服务/解析失败，非 404）
+
   // 拉取题库文件
   try {
     updateSyncStatus('banks', 'syncing');
     const text = await storageDownload(BANKS_FILE);
     if (text !== null) {
-      noData = false;
+      anyData = true;
       const data = JSON.parse(text);
       if ((data.updatedAt || 0) > meta.banks.lastModified) {
         const ok = await importBanksData(data);
         if (ok) { meta.banks.lastModified = data.updatedAt; setCloudMeta(meta); anySuccess = true; }
       }
-      updateSyncStatus('banks', 'idle');
-    } else {
-      updateSyncStatus('banks', 'idle');
     }
+    updateSyncStatus('banks', 'idle');
   } catch(e) {
     console.error('从云端拉取题库失败:', e);
+    remoteUnavailable = true;
     updateSyncStatus('banks', 'error');
   }
-  
+
   // 拉取记录文件
   try {
     updateSyncStatus('records', 'syncing');
     const text = await storageDownload(RECORDS_FILE);
     if (text !== null) {
-      noData = false;
+      anyData = true;
       const data = JSON.parse(text);
       if ((data.updatedAt || 0) > meta.records.lastModified) {
         const ok = await importRecordsData(data);
         if (ok) { meta.records.lastModified = data.updatedAt; setCloudMeta(meta); anySuccess = true; }
       }
-      updateSyncStatus('records', 'idle');
-    } else {
-      updateSyncStatus('records', 'idle');
     }
+    updateSyncStatus('records', 'idle');
   } catch(e) {
     console.error('从云端拉取记录失败:', e);
+    remoteUnavailable = true;
     updateSyncStatus('records', 'error');
   }
-  
-  if (noData) return { success: false, reason: 'no_data' };
+
+  // 有任一请求异常时，绝不能判定为「云端无数据」，否则会用本地空数据覆盖云端
+  if (remoteUnavailable) return { success: anySuccess, reason: 'network_error' };
+  if (!anyData) return { success: false, reason: 'no_data' };
   return { success: anySuccess, reason: anySuccess ? 'ok' : 'local_newer' };
 }
 
@@ -1473,8 +1482,11 @@ window.addEventListener('beforeunload', (e) => {
 });
 
 // 页面隐藏/退出时，用 keepalive 尽力上传一次未同步数据，降低丢失风险
-async function flushPendingOnExit() {
+// force=true：真正退出页面（pagehide），全部上传
+// force=false：仅切到后台（visibilitychange），改动不足 1 分钟的记录先不传，避免频繁切换 App 反复上传
+async function flushPendingOnExit(force = true) {
   if (!cloudEnabled) return;
+  const now = Date.now();
   try {
     if (syncState.banks.dirty) {
       const data = await exportBanksData();
@@ -1485,8 +1497,10 @@ async function flushPendingOnExit() {
         keepalive: true
       });
       syncState.banks.dirty = false;
+      syncState.banks.firstDirtyAt = 0;
     }
-    if (syncState.records.dirty) {
+    const recordsAge = now - (syncState.records.firstDirtyAt || 0);
+    if (syncState.records.dirty && (force || recordsAge >= EXIT_FLUSH_MIN_AGE_MS)) {
       const data = await exportRecordsData();
       await fetch(`${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${RECORDS_FILE}`, {
         method: 'POST',
@@ -1495,6 +1509,7 @@ async function flushPendingOnExit() {
         keepalive: true
       });
       syncState.records.dirty = false;
+      syncState.records.firstDirtyAt = 0;
     }
   } catch(e) {
     // 退出时的尽力上传，失败不打扰用户
@@ -1502,9 +1517,9 @@ async function flushPendingOnExit() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') flushPendingOnExit();
+  if (document.visibilityState === 'hidden') flushPendingOnExit(false);
 });
-window.addEventListener('pagehide', () => { flushPendingOnExit(); });
+window.addEventListener('pagehide', () => { flushPendingOnExit(true); });
 
 // ========== 数据导出/导入（JSON 备份） ==========
 async function exportAllData() {
@@ -6502,9 +6517,22 @@ async function init() {
       if (result.success) {
         console.log('从云端同步数据成功');
       } else if (result.reason === 'no_data') {
-        console.log('云端无数据，上传本地数据');
-        doSyncBanksToCloud();
-        doSyncRecordsToCloud();
+        // 只有确认云端确实为空（404）时，才允许把本地数据传上去
+        const localBanks = await dbGetAll('banks');
+        if (localBanks.length > 0) {
+          console.log('云端无数据，上传本地数据');
+          doSyncBanksToCloud();
+          doSyncRecordsToCloud();
+        } else {
+          console.log('云端与本地均无数据，跳过上传');
+        }
+      } else if (result.reason === 'network_error') {
+        // 网络/服务异常时绝不上传，避免本地空数据覆盖云端备份
+        console.warn('云端暂时无法访问，本次不上传本地数据');
+        const localBanks = await dbGetAll('banks');
+        if (localBanks.length === 0) {
+          alert('云端连接失败，且本地暂无题库数据。\n\n请检查网络后刷新页面重试。\n在此之前请勿清除浏览器数据，否则可能丢失云端备份的恢复机会。');
+        }
       }
     }
   } catch(e) {
