@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 安全加固：限制脚本/连接/图片加载来源，即使页面被注入脚本也难把数据外传。
+     如以后需要加载外链图片，把 img-src 里的 https: 加回来即可。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://nkscbmongsdstijnubkb.supabase.co https://api.deepseek.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>题库刷题助手</title>
 <script src="libs/tailwind.min.js"></script>
 <style>
@@ -148,6 +151,11 @@
       </div>
     </nav>
     <div class="p-3 border-t border-gray-100 text-xs text-gray-400">
+      <div class="text-center mb-1" style="font-size:11px">
+        <button onclick="openBackupModal()" class="text-blue-500 hover:underline">云端历史版本</button>
+        <span class="text-gray-300">·</span>
+        <button onclick="openAuthModal()" class="text-blue-500 hover:underline">云端账号</button>
+      </div>
       <div id="appVersion" class="text-center text-gray-300 mb-1" style="font-size:11px"></div>
       <div id="cloudSyncStatus" class="flex items-center justify-center gap-1 cursor-pointer hover:text-gray-600 transition" onclick="manualSync()" title="点击手动同步">
         <span class="text-gray-400">☁️ 云端同步</span>
@@ -741,6 +749,40 @@
   </div>
 </div>
 
+<!-- 云端历史版本弹窗 -->
+<div id="backupModal" class="modal-overlay hidden">
+  <div class="bg-white rounded-xl shadow-xl max-w-lg w-full mx-4 p-5 flex flex-col" style="max-height:80vh">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-gray-800">云端历史版本</h3>
+      <button onclick="showModal('backupModal', false)" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <p class="text-xs text-gray-400 mb-3">每天自动保留一份快照，最多保留 10 份。恢复会用该快照覆盖当前数据。</p>
+    <div class="flex gap-2 mb-3">
+      <button onclick="loadBackupList('banks')" id="backupTabBanks" class="flex-1 px-3 py-1.5 rounded-lg text-sm bg-blue-500 text-white">题库快照</button>
+      <button onclick="loadBackupList('records')" id="backupTabRecords" class="flex-1 px-3 py-1.5 rounded-lg text-sm bg-gray-100 text-gray-600">记录快照</button>
+    </div>
+    <div id="backupList" class="flex-1 overflow-y-auto scrollbar-thin text-sm text-gray-500">加载中…</div>
+  </div>
+</div>
+
+<!-- 云端账号弹窗 -->
+<div id="authModal" class="modal-overlay hidden">
+  <div class="bg-white rounded-xl shadow-xl max-w-sm w-full mx-4 p-5">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-lg font-bold text-gray-800">云端账号</h3>
+      <button onclick="showModal('authModal', false)" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <p class="text-xs text-gray-400 mb-4">仅在把 Supabase 存储桶设为「私有」后需要登录。默认公开桶可留空不登录。</p>
+    <div id="authStatus" class="text-xs text-gray-500 mb-3"></div>
+    <input id="authEmail" type="email" placeholder="邮箱" autocomplete="username" class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-2 text-sm">
+    <input id="authPassword" type="password" placeholder="密码" autocomplete="current-password" class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-3 text-sm">
+    <div class="flex gap-2">
+      <button id="authLogoutBtn" onclick="doCloudLogout()" class="flex-1 px-4 py-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm">退出登录</button>
+      <button onclick="doCloudLogin()" class="flex-1 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-sm">登录</button>
+    </div>
+  </div>
+</div>
+
 <!-- 错题专刷未完成进度弹窗 -->
 <div id="wrongProgressModal" class="modal-overlay hidden">
   <div class="bg-white rounded-xl shadow-xl max-w-sm w-full mx-4 p-6">
@@ -1026,6 +1068,57 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
 }
 
+// ========== 外部数据（云端/备份文件）入库前的规范化 ==========
+// 云端数据和导入文件都可能被改写。这里只保留程序认识的字段与类型，
+// 避免把任意 id、任意选项键、非数字计数带进 IndexedDB 和后续的 HTML 拼接。
+const OPTION_KEY_LIST = ['A', 'B', 'C', 'D', 'E', 'F'];
+
+function normalizeBankForStore(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const b = Object.assign({}, raw);
+  b.id = String(b.id === null || b.id === undefined ? '' : b.id).slice(0, 120) || generateId();
+  b.name = String(b.name === null || b.name === undefined ? '' : b.name);
+  if (typeof b.fileName !== 'string') b.fileName = '';
+  b.importTime = Number(b.importTime) || Date.now();
+  b.updatedAt = Number(b.updatedAt) || 0;
+  b.questionCount = Number(b.questionCount) || 0;
+  b.totalAttempts = Number(b.totalAttempts) || 0;
+  b.totalCorrect = Number(b.totalCorrect) || 0;
+  b.totalWrong = Number(b.totalWrong) || 0;
+  b.totalRounds = Number(b.totalRounds) || 0;
+  b.favoritedCount = Number(b.favoritedCount) || 0;
+  return b;
+}
+
+function normalizeQuestionForStore(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const q = Object.assign({}, raw);
+  q.id = String(q.id === null || q.id === undefined ? '' : q.id).slice(0, 160);
+  if (!q.id) return null;
+  q.bankId = String(q.bankId === null || q.bankId === undefined ? '' : q.bankId).slice(0, 120);
+  q.question = String(q.question === null || q.question === undefined ? '' : q.question);
+  q.type = String(q.type === null || q.type === undefined ? '' : q.type);
+  q.source = String(q.source === null || q.source === undefined ? '' : q.source);
+  q.questionNum = q.questionNum === null || q.questionNum === undefined ? '' : String(q.questionNum);
+  // 答案只可能是 A-F（parseAnswer 的约定），过滤掉任何其它字符
+  q.answer = String(q.answer === null || q.answer === undefined ? '' : q.answer)
+    .toUpperCase().replace(/[^A-F]/g, '');
+  const rawOpts = (raw.options && typeof raw.options === 'object') ? raw.options : {};
+  const opts = {};
+  OPTION_KEY_LIST.forEach(k => {
+    const v = rawOpts[k];
+    if (v !== undefined && v !== null && v !== '') opts[k] = String(v);
+  });
+  q.options = opts;
+  q.isMulti = !!q.isMulti;
+  q.isCaseSub = !!q.isCaseSub;
+  q.isGuaranteed = !!q.isGuaranteed;
+  q.isFavorited = !!q.isFavorited;
+  q.caseBackground = q.caseBackground === null || q.caseBackground === undefined ? null : String(q.caseBackground);
+  q.updatedAt = Number(q.updatedAt) || 0;
+  return q;
+}
+
 // ========== 云端同步（Supabase Storage 纯 fetch 版，分文件存储） ==========
 const SUPABASE_URL = 'https://nkscbmongsdstijnubkb.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_-OPF8_GhNFascgJXMnjfzg_yS26Stz5';
@@ -1039,7 +1132,7 @@ const BANKS_MAX_WAIT_MS = 600000;   // 题库持续改动时，最多累计 10 �
 const RECORDS_THROTTLE_MS = 300000; // 记录改动：5 分钟批量上传一次
 const EXIT_FLUSH_MIN_AGE_MS = 60000; // 切到后台时，改动不足 1 分钟不触发上传（避免频繁切换 App 反复上传）
 
-const APP_VERSION = '云端同步版 v2.2'; // 当前页面版本标识
+const APP_VERSION = '云端同步版 v2.3'; // 当前页面版本标识
 
 const MAX_RETRIES = 3;         // 同步失败自动重试次数
 const RETRY_BASE_MS = 10000;   // 重试基础间隔（10s → 20s → 40s 指数退避）
@@ -1056,7 +1149,9 @@ const syncState = {
 function classifySyncError(e) {
   const msg = (e && e.message) ? String(e.message) : String(e);
   if (typeof navigator !== 'undefined' && !navigator.onLine) return { type: 'offline', message: '未连接网络，请连接后重试' };
-  if (/401|403/.test(msg)) return { type: 'auth', message: '云端权限校验失败' };
+  if (/401|403/.test(msg) || /Unauthorized|row-level security|permission denied/i.test(msg)) {
+    return { type: 'auth', message: getAuthSession() ? '云端登录已过期，请重新登录' : '需要登录云端账号' };
+  }
   if (/404/.test(msg)) return { type: 'missing', message: '云端文件不存在' };
   if (/50[0-9]/.test(msg)) return { type: 'server', message: '云端服务暂不可用' };
   if (e && e.name === 'SyntaxError') return { type: 'parse', message: '云端数据解析失败' };
@@ -1075,22 +1170,158 @@ function setCloudMeta(meta) {
   try { localStorage.setItem(CLOUD_META_KEY, JSON.stringify(meta)); } catch(e) {}
 }
 
+// ========== 云端账号（私有桶鉴权，可选） ==========
+const AUTH_SESSION_KEY = 'cloud_auth_session';
+let currentAccessToken = null;
+let authRefreshPromise = null;
+
+function getAuthSession() {
+  try { return JSON.parse(localStorage.getItem(AUTH_SESSION_KEY) || 'null'); } catch(e) { return null; }
+}
+
+function setAuthSession(s) {
+  try {
+    if (s) localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(s));
+    else localStorage.removeItem(AUTH_SESSION_KEY);
+  } catch(e) {}
+  currentAccessToken = (s && s.access_token) ? s.access_token : null;
+}
+
+async function authRequest(path, body) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
+    method: 'POST',
+    headers: { 'apikey': SUPABASE_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const text = await res.text();
+  let json = {};
+  try { json = text ? JSON.parse(text) : {}; } catch(e) {}
+  if (!res.ok) {
+    const msg = json.error_description || json.msg || json.error || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return json;
+}
+
+function saveSessionFromAuth(json) {
+  const session = {
+    access_token: json.access_token,
+    refresh_token: json.refresh_token,
+    expires_at: Date.now() + ((json.expires_in || 3600) * 1000),
+    email: (json.user && json.user.email) || ''
+  };
+  setAuthSession(session);
+  return session;
+}
+
+async function signInWithPassword(email, password) {
+  const json = await authRequest('token?grant_type=password', { email, password });
+  return saveSessionFromAuth(json);
+}
+
+async function refreshAuthToken() {
+  if (authRefreshPromise) return authRefreshPromise;
+  const s = getAuthSession();
+  if (!s || !s.refresh_token) return null;
+  authRefreshPromise = (async () => {
+    try {
+      const json = await authRequest('token?grant_type=refresh_token', { refresh_token: s.refresh_token });
+      return saveSessionFromAuth(json);
+    } catch(e) {
+      console.warn('刷新云端登录失败:', e);
+      setAuthSession(null);
+      return null;
+    } finally {
+      authRefreshPromise = null;
+    }
+  })();
+  return authRefreshPromise;
+}
+
+async function initAuth() {
+  const s = getAuthSession();
+  if (!s) { currentAccessToken = null; return; }
+  if (s.expires_at && s.expires_at - 60000 > Date.now()) { currentAccessToken = s.access_token; return; }
+  await refreshAuthToken();
+}
+
+function openAuthModal() {
+  const s = getAuthSession();
+  const statusEl = document.getElementById('authStatus');
+  const logoutBtn = document.getElementById('authLogoutBtn');
+  if (statusEl) statusEl.textContent = s ? `已登录：${s.email || '云端账号'}` : '当前未登录';
+  if (logoutBtn) logoutBtn.style.display = s ? '' : 'none';
+  const emailEl = document.getElementById('authEmail');
+  if (emailEl) emailEl.value = s ? (s.email || '') : '';
+  const pwdEl = document.getElementById('authPassword');
+  if (pwdEl) pwdEl.value = '';
+  showModal('authModal', true);
+}
+
+async function doCloudLogin() {
+  const email = (document.getElementById('authEmail').value || '').trim();
+  const password = document.getElementById('authPassword').value || '';
+  if (!email || !password) { alert('请输入邮箱和密码'); return; }
+  const statusEl = document.getElementById('authStatus');
+  if (statusEl) statusEl.textContent = '登录中…';
+  try {
+    const s = await signInWithPassword(email, password);
+    if (statusEl) statusEl.textContent = `已登录：${s.email || email}`;
+    document.getElementById('authLogoutBtn').style.display = '';
+    alert('登录成功，正在同步云端数据');
+    showModal('authModal', false);
+    runStartupCloudSync();
+  } catch(e) {
+    if (statusEl) statusEl.textContent = '登录失败：' + e.message;
+  }
+}
+
+async function doCloudLogout() {
+  if (!confirm('确定退出云端账号吗？退出后将无法读写私有桶数据。')) return;
+  const s = getAuthSession();
+  // 通知服务端注销当前会话，让 refresh_token 立即失效；
+  // 否则只清本地存储的话，旧 token 在服务端仍然可用。
+  if (s && s.access_token) {
+    try {
+      await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
+        method: 'POST',
+        headers: getStorageHeaders({ 'Content-Type': 'application/json' })
+      });
+    } catch (e) {
+      console.warn('注销云端会话失败:', e);
+    }
+  }
+  setAuthSession(null);
+  alert('已退出登录');
+  showModal('authModal', false);
+  refreshSyncBadge();
+}
+
 // 生成 Supabase Storage 请求头
 function getStorageHeaders(extra = {}) {
   return Object.assign({
     'apikey': SUPABASE_KEY,
-    'Authorization': 'Bearer ' + SUPABASE_KEY
+    'Authorization': 'Bearer ' + (currentAccessToken || SUPABASE_KEY)
   }, extra);
 }
 
 // 上传文件到 Supabase Storage
 async function storageUpload(path, data, contentType = 'application/json') {
   const url = `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${path}`;
-  const res = await fetch(url, {
+  const doFetch = () => fetch(url, {
     method: 'POST',
     headers: getStorageHeaders({ 'Content-Type': contentType, 'x-upsert': 'true' }),
     body: data
   });
+  let res = await doFetch();
+  if (res.status === 401) {
+    // 登录态过期，刷新一次后重试
+    const s = getAuthSession();
+    if (s && s.refresh_token) {
+      await refreshAuthToken();
+      res = await doFetch();
+    }
+  }
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`上传失败 (${res.status}): ${errText}`);
@@ -1101,10 +1332,18 @@ async function storageUpload(path, data, contentType = 'application/json') {
 // 从 Supabase Storage 下载文件
 async function storageDownload(path) {
   const url = `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${path}`;
-  const res = await fetch(url, {
+  const doFetch = () => fetch(url, {
     method: 'GET',
     headers: getStorageHeaders()
   });
+  let res = await doFetch();
+  if (res.status === 401) {
+    const s = getAuthSession();
+    if (s && s.refresh_token) {
+      await refreshAuthToken();
+      res = await doFetch();
+    }
+  }
   if (res.status === 404) return null; // 文件不存在
   if (!res.ok) {
     const errText = await res.text();
@@ -1113,11 +1352,132 @@ async function storageDownload(path) {
   return await res.text();
 }
 
-// 导出题库数据（题库 + 题目）
+// ========== 云端历史版本（每日快照，最多保留 10 份） ==========
+const BACKUP_PREFIX = 'backups/';
+const BACKUP_KEEP = 10;
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+async function listBackups(kind) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/list/${STORAGE_BUCKET}`, {
+    method: 'POST',
+    headers: getStorageHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ prefix: `${BACKUP_PREFIX}${kind}-`, limit: 100, sortBy: { column: 'name', order: 'asc' } })
+  });
+  if (!res.ok) throw new Error(`列出版本失败 (${res.status})`);
+  const arr = await res.json();
+  return arr.map(o => o.name).filter(n => n && n.endsWith('.json')).sort();
+}
+
+async function copyObject(sourceKey, destKey) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/copy`, {
+    method: 'POST',
+    headers: getStorageHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ bucketId: STORAGE_BUCKET, sourceKey, destinationKey: destKey })
+  });
+  if (!res.ok) throw new Error(`复制快照失败 (${res.status})`);
+}
+
+async function deleteObject(key) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${key}`, {
+    method: 'DELETE',
+    headers: getStorageHeaders()
+  });
+  if (!res.ok) throw new Error(`删除快照失败 (${res.status})`);
+}
+
+// 每天首次上传前，把云端当前版本复制一份（服务端复制，不耗本地流量）
+async function ensureDailySnapshot(kind, sourceFile) {
+  const name = `${kind}-${todayStr()}.json`;
+  const names = await listBackups(kind);
+  if (names.includes(name)) return;
+  await copyObject(sourceFile, BACKUP_PREFIX + name);
+  const all = [...names, name].sort();
+  while (all.length > BACKUP_KEEP) {
+    await deleteObject(BACKUP_PREFIX + all.shift());
+  }
+}
+
+// 立即生成一份快照（恢复前用，避免当天已有快照时当前版本丢失）
+async function snapshotNow(kind, sourceFile) {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const name = `${kind}-manual-${stamp}.json`;
+  const names = await listBackups(kind);
+  await copyObject(sourceFile, BACKUP_PREFIX + name);
+  const all = [...names, name].sort();
+  while (all.length > BACKUP_KEEP) {
+    await deleteObject(BACKUP_PREFIX + all.shift());
+  }
+  return name;
+}
+
+let backupKind = 'banks';
+
+function openBackupModal() {
+  showModal('backupModal', true);
+  loadBackupList('banks');
+}
+
+async function loadBackupList(kind) {
+  backupKind = kind;
+  const banksTab = document.getElementById('backupTabBanks');
+  const recTab = document.getElementById('backupTabRecords');
+  const listEl = document.getElementById('backupList');
+  const on = 'flex-1 px-3 py-1.5 rounded-lg text-sm bg-blue-500 text-white';
+  const off = 'flex-1 px-3 py-1.5 rounded-lg text-sm bg-gray-100 text-gray-600';
+  if (banksTab) banksTab.className = kind === 'banks' ? on : off;
+  if (recTab) recTab.className = kind === 'records' ? on : off;
+  listEl.textContent = '加载中…';
+  try {
+    const names = await listBackups(kind);
+    if (!names.length) {
+      listEl.innerHTML = '<div class="py-6 text-center text-gray-400">暂无历史版本<br><span class="text-xs">每天首次上传时会自动生成一份</span></div>';
+      return;
+    }
+    listEl.innerHTML = names.slice().reverse().map(n => {
+      const label = n.replace(/^.*\//, '').replace(/\.json$/, '');
+      return `<div class="flex items-center justify-between py-2 border-b border-gray-100">
+        <span class="text-gray-700">${escapeHtml(label)}</span>
+        <button onclick="restoreBackup(${jsArg(kind)},${jsArg(n)})" class="px-3 py-1 text-xs bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100">恢复</button>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    listEl.innerHTML = `<div class="py-6 text-center text-red-500">${escapeHtml(e && e.message ? e.message : String(e))}</div>`;
+  }
+}
+
+async function restoreBackup(kind, name) {
+  const label = kind === 'banks' ? '题库' : '记录';
+  if (!confirm(`确定用「${name}」覆盖当前${label}数据吗？\n恢复前会先自动备份当前云端版本，可随时再恢复回来。`)) return;
+  try {
+    try { await snapshotNow(kind, kind === 'banks' ? BANKS_FILE : RECORDS_FILE); } catch(e) { console.warn('恢复前生成快照失败:', e); }
+    const text = await storageDownload(BACKUP_PREFIX + name);
+    if (text === null) throw new Error('快照文件不存在');
+    const data = JSON.parse(text);
+    if (kind === 'banks') {
+      await importBanksData(data);
+      await doSyncBanksToCloud();
+    } else {
+      await importRecordsData(data);
+      await doSyncRecordsToCloud();
+    }
+    alert('恢复成功，页面将重新加载');
+    location.reload();
+  } catch(e) {
+    alert('恢复失败：' + e.message);
+  }
+}
+
+// 导出题库数据（题库 + 题目 + 删除标记）
 async function exportBanksData() {
   const banks = await dbGetAll('banks');
   const questions = await dbGetAll('questions');
-  return { version: 1, updatedAt: Date.now(), banks, questions };
+  return { version: 1, updatedAt: Date.now(), banks, questions, deletedBanks: getDeletedBanks() };
 }
 
 // 导出记录数据（答题记录 + 进度 + 设置）
@@ -1129,10 +1489,10 @@ async function exportRecordsData() {
   try { practiceProgress = JSON.parse(localStorage.getItem('quiz_practice_progress') || 'null'); } catch(e) {}
   try { wrongPracticeProgress = JSON.parse(localStorage.getItem('ti_ku_wrong_practice_progress_v1') || 'null'); } catch(e) {}
   
-  // 注意：不同步 ai_api_key（安全），Key 只在各设备本地保存
+  // 注意：不同步 ai_settings（含 API Key），Key 只在各设备本地保存
   const settings = {};
   try {
-    const keys = ['ai_api_base', 'ai_model', 'aiFabPosition', 'current_page'];
+    const keys = SYNCABLE_SETTING_KEYS;
     keys.forEach(k => {
       const v = localStorage.getItem(k);
       if (v) settings[k] = v;
@@ -1156,10 +1516,12 @@ async function importBanksData(data) {
       });
     }
     for (const item of (data.banks || [])) {
-      await dbAdd('banks', item).catch(() => dbPut('banks', item));
+      const bank = normalizeBankForStore(item);
+      if (bank) await dbAdd('banks', bank).catch(() => dbPut('banks', bank));
     }
     for (const item of (data.questions || [])) {
-      await dbAdd('questions', item).catch(() => dbPut('questions', item));
+      const question = normalizeQuestionForStore(item);
+      if (question) await dbAdd('questions', question).catch(() => dbPut('questions', question));
     }
     return true;
   } catch(e) {
@@ -1189,13 +1551,163 @@ async function importRecordsData(data) {
     if (data.wrongPracticeProgress) { try { localStorage.setItem('ti_ku_wrong_practice_progress_v1', JSON.stringify(data.wrongPracticeProgress)); } catch(e) {} }
     if (data.settings) {
       for (const [k, v] of Object.entries(data.settings)) {
-        try { localStorage.setItem(k, v); } catch(e) {}
+        if (!SYNCABLE_SETTING_KEYS.includes(k)) continue;
+        try { localStorage.setItem(k, String(v)); } catch(e) {}
       }
     }
     return true;
   } catch(e) {
     console.error('导入记录数据失败:', e);
     return false;
+  } finally {
+    setTimeout(() => { isSyncingFromCloud = false; }, 500);
+  }
+}
+
+// ========== 合并式导入（避免多设备互相覆盖） ==========
+const DELETED_BANKS_KEY = 'cloud_deleted_banks';
+
+// 允许随记录一起同步的本地设置项白名单。
+// 云端 JSON 是可写数据源，绝不能把里面任意 key 都塞进 localStorage。
+const SYNCABLE_SETTING_KEYS = ['ai_api_base', 'ai_model', 'aiFabPosition', 'current_page'];
+
+function getDeletedBanks() {
+  try { return JSON.parse(localStorage.getItem(DELETED_BANKS_KEY) || '{}') || {}; } catch(e) { return {}; }
+}
+
+function addDeletedBank(bankId) {
+  try {
+    const m = getDeletedBanks();
+    m[bankId] = Date.now();
+    const cutoff = Date.now() - 90 * 24 * 3600 * 1000;
+    Object.keys(m).forEach(k => { if (m[k] < cutoff) delete m[k]; });
+    localStorage.setItem(DELETED_BANKS_KEY, JSON.stringify(m));
+  } catch(e) {}
+}
+
+// 题库/题目按 id 合并：统计字段取最大，内容取更新时间较新的一方
+// 返回 { changed: 本地是否被云端更新, needsUpload: 是否有本地独有的内容需要回传 }
+async function mergeBanksData(data) {
+  if (!data || !Array.isArray(data.banks)) return { changed: false, needsUpload: false };
+  isSyncingFromCloud = true;
+  try {
+    const localBanks = await dbGetAll('banks');
+    const localQuestions = await dbGetAll('questions');
+    const tomb = Object.assign({}, getDeletedBanks(), data.deletedBanks || {});
+    try { localStorage.setItem(DELETED_BANKS_KEY, JSON.stringify(tomb)); } catch(e) {}
+
+    const bankMap = new Map(localBanks.map(b => [b.id, b]));
+    let changed = false;
+    let needsUpload = false;
+
+    for (const cb of data.banks) {
+      if (tomb[cb.id]) continue;
+      const lb = bankMap.get(cb.id);
+      if (!lb) { bankMap.set(cb.id, cb); changed = true; continue; }
+      const merged = Object.assign({}, lb);
+      ['totalAttempts', 'totalCorrect', 'totalWrong', 'totalRounds'].forEach(k => {
+        if ((cb[k] || 0) > (merged[k] || 0)) { merged[k] = cb[k]; changed = true; }
+        else if ((merged[k] || 0) > (cb[k] || 0)) { needsUpload = true; }
+      });
+      if ((cb.updatedAt || 0) > (lb.updatedAt || 0)) {
+        Object.keys(cb).forEach(k => { merged[k] = cb[k]; });
+        changed = true;
+      } else if ((lb.updatedAt || 0) > (cb.updatedAt || 0)) {
+        needsUpload = true;
+      }
+      bankMap.set(cb.id, merged);
+    }
+    for (const id of Object.keys(tomb)) { if (bankMap.delete(id)) changed = true; }
+
+    const cloudBankIds = new Set(data.banks.map(b => b.id));
+    for (const id of bankMap.keys()) { if (!cloudBankIds.has(id)) { needsUpload = true; break; } }
+
+    const qMap = new Map(localQuestions.map(q => [q.id, q]));
+    for (const cq of (data.questions || [])) {
+      if (tomb[cq.bankId]) continue;
+      const lq = qMap.get(cq.id);
+      if (!lq) { qMap.set(cq.id, cq); changed = true; continue; }
+      if ((cq.updatedAt || 0) > (lq.updatedAt || 0)) { qMap.set(cq.id, cq); changed = true; }
+      else if ((lq.updatedAt || 0) > (cq.updatedAt || 0)) { needsUpload = true; }
+    }
+    const cloudQIds = new Set((data.questions || []).map(q => q.id));
+    for (const id of qMap.keys()) { if (!cloudQIds.has(id)) { needsUpload = true; break; } }
+
+    if (!changed) return { changed: false, needsUpload };
+
+    for (const store of ['banks', 'questions']) {
+      const tx = db.transaction(store, 'readwrite');
+      tx.objectStore(store).clear();
+      await new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    const banksOut = [...bankMap.values()].map(normalizeBankForStore).filter(Boolean);
+    const questionsOut = [...qMap.values()].map(normalizeQuestionForStore).filter(Boolean);
+    if (banksOut.length) await dbAddBatch('banks', banksOut);
+    if (questionsOut.length) await dbAddBatch('questions', questionsOut);
+    return { changed: true, needsUpload };
+  } catch(e) {
+    console.error('合并题库数据失败:', e);
+    return { changed: false, needsUpload: false };
+  } finally {
+    setTimeout(() => { isSyncingFromCloud = false; }, 500);
+  }
+}
+
+// 答题记录按内容去重合并（记录是只追加的事件，不能整体覆盖）
+async function mergeRecordsData(data) {
+  if (!data) return { changed: false, needsUpload: false };
+  isSyncingFromCloud = true;
+  try {
+    const local = await dbGetAll('records');
+    const keyOf = r => `${r.bankId}|${r.questionId}|${r.timestamp}|${r.isCorrect ? 1 : 0}`;
+    const seen = new Set(local.map(keyOf));
+    const cloudKeys = new Set((data.records || []).map(keyOf));
+    const toAdd = [];
+    for (const r of (data.records || [])) {
+      const k = keyOf(r);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const copy = Object.assign({}, r);
+      delete copy.id;
+      toAdd.push(copy);
+    }
+    if (toAdd.length) await dbAddBatch('records', toAdd);
+
+    let needsUpload = false;
+    for (const r of local) { if (!cloudKeys.has(keyOf(r))) { needsUpload = true; break; } }
+
+    // 刷题进度：按题库逐条取时间戳较新的，避免旧进度覆盖新进度
+    if (data.practiceProgress && !state.practice) {
+      const localList = getAllProgressList();
+      const cloudList = Array.isArray(data.practiceProgress)
+        ? data.practiceProgress
+        : (data.practiceProgress.list || []);
+      const map = new Map(localList.map(p => [p.bankId, p]));
+      let progressChanged = false;
+      for (const cp of cloudList) {
+        if (!cp || !cp.bankId) continue;
+        const lp = map.get(cp.bankId);
+        if (!lp) { map.set(cp.bankId, cp); progressChanged = true; }
+        else if ((cp.timestamp || 0) > (lp.timestamp || 0)) { map.set(cp.bankId, cp); progressChanged = true; }
+        else if ((lp.timestamp || 0) > (cp.timestamp || 0)) { needsUpload = true; }
+      }
+      if (progressChanged) saveAllProgressList([...map.values()]);
+    }
+
+    // 设置项只补本地缺失的，绝不覆盖本机已有配置
+    if (data.settings) {
+      for (const [k, v] of Object.entries(data.settings)) {
+        if (!SYNCABLE_SETTING_KEYS.includes(k)) continue;
+        try { if (localStorage.getItem(k) === null) localStorage.setItem(k, String(v)); } catch(e) {}
+      }
+    }
+    return { changed: toAdd.length > 0, needsUpload };
+  } catch(e) {
+    console.error('合并记录数据失败:', e);
+    return { changed: false, needsUpload: false };
   } finally {
     setTimeout(() => { isSyncingFromCloud = false; }, 500);
   }
@@ -1250,6 +1762,7 @@ async function doSyncBanksToCloud() {
   try {
     updateSyncStatus('banks', 'syncing');
     const data = await exportBanksData();
+    try { await ensureDailySnapshot('banks', BANKS_FILE); } catch(e) { console.warn('生成题库快照失败:', e); }
     await storageUpload(BANKS_FILE, JSON.stringify(data), 'application/json');
     syncState.banks.dirty = false;
     syncState.banks.firstDirtyAt = 0;
@@ -1277,6 +1790,7 @@ async function doSyncRecordsToCloud() {
   try {
     updateSyncStatus('records', 'syncing');
     const data = await exportRecordsData();
+    try { await ensureDailySnapshot('records', RECORDS_FILE); } catch(e) { console.warn('生成记录快照失败:', e); }
     await storageUpload(RECORDS_FILE, JSON.stringify(data), 'application/json');
     syncState.records.dirty = false;
     syncState.records.firstDirtyAt = 0;
@@ -1318,6 +1832,8 @@ async function syncFromCloud() {
   let anySuccess = false;
   let anyData = false;        // 云端确实存在数据文件
   let remoteUnavailable = false; // 至少一个文件请求异常（网络/服务/解析失败，非 404）
+  let banksNeedUpload = false;
+  let recordsNeedUpload = false;
 
   // 拉取题库文件
   try {
@@ -1326,10 +1842,15 @@ async function syncFromCloud() {
     if (text !== null) {
       anyData = true;
       const data = JSON.parse(text);
-      if ((data.updatedAt || 0) > meta.banks.lastModified) {
-        const ok = await importBanksData(data);
-        if (ok) { meta.banks.lastModified = data.updatedAt; setCloudMeta(meta); anySuccess = true; }
-      }
+      const r = await mergeBanksData(data);
+      if (r.changed) anySuccess = true;
+      banksNeedUpload = !!r.needsUpload;
+      meta.banks.lastModified = Math.max(meta.banks.lastModified || 0, data.updatedAt || 0);
+      setCloudMeta(meta);
+    } else {
+      // 云端没有题库文件：本地有题库就回传，避免这类数据永久缺失
+      const localBanks = await dbGetAll('banks');
+      if (localBanks.length > 0) banksNeedUpload = true;
     }
     updateSyncStatus('banks', 'idle');
   } catch(e) {
@@ -1345,10 +1866,15 @@ async function syncFromCloud() {
     if (text !== null) {
       anyData = true;
       const data = JSON.parse(text);
-      if ((data.updatedAt || 0) > meta.records.lastModified) {
-        const ok = await importRecordsData(data);
-        if (ok) { meta.records.lastModified = data.updatedAt; setCloudMeta(meta); anySuccess = true; }
-      }
+      const r = await mergeRecordsData(data);
+      if (r.changed) anySuccess = true;
+      recordsNeedUpload = !!r.needsUpload;
+      meta.records.lastModified = Math.max(meta.records.lastModified || 0, data.updatedAt || 0);
+      setCloudMeta(meta);
+    } else {
+      // 云端没有记录文件：本地有答题记录就回传
+      const localRecords = await dbGetAll('records');
+      if (localRecords.length > 0) recordsNeedUpload = true;
     }
     updateSyncStatus('records', 'idle');
   } catch(e) {
@@ -1358,9 +1884,9 @@ async function syncFromCloud() {
   }
 
   // 有任一请求异常时，绝不能判定为「云端无数据」，否则会用本地空数据覆盖云端
-  if (remoteUnavailable) return { success: anySuccess, reason: 'network_error' };
-  if (!anyData) return { success: false, reason: 'no_data' };
-  return { success: anySuccess, reason: anySuccess ? 'ok' : 'local_newer' };
+  if (remoteUnavailable) return { success: anySuccess, reason: 'network_error', banksNeedUpload: false, recordsNeedUpload: false };
+  if (!anyData) return { success: false, reason: 'no_data', banksNeedUpload: false, recordsNeedUpload: false };
+  return { success: anySuccess, reason: anySuccess ? 'ok' : 'local_newer', banksNeedUpload, recordsNeedUpload };
 }
 
 // 更新同步状态显示（按文件 + 综合）
@@ -1416,7 +1942,7 @@ async function manualSync() {
     alert('云端同步未启用');
     return;
   }
-  if (!confirm('将同步题库和答题记录数据，是否继续？')) return;
+  if (!confirm('将拉取云端数据并与本地合并（不会覆盖），再把合并结果上传，是否继续？')) return;
   
   const meta = getCloudMeta();
   
@@ -1428,16 +1954,10 @@ async function manualSync() {
       banksMsg = '已上传本地';
     } else {
       const data = JSON.parse(text);
-      if ((data.updatedAt || 0) > meta.banks.lastModified) {
-        await importBanksData(data);
-        meta.banks.lastModified = data.updatedAt; setCloudMeta(meta);
-        banksMsg = '已从云端更新';
-      } else if (syncState.banks.dirty) {
-        await doSyncBanksToCloud();
-        banksMsg = '已上传本地';
-      } else {
-        banksMsg = '已是最新';
-      }
+      const merged = await mergeBanksData(data);
+      meta.banks.lastModified = Math.max(meta.banks.lastModified || 0, data.updatedAt || 0); setCloudMeta(meta);
+      await doSyncBanksToCloud();
+      banksMsg = merged.changed ? '已合并云端数据' : '已是最新';
     }
   } catch(e) { console.error(e); banksMsg = '失败'; syncState.banks.lastError = classifySyncError(e).message; updateSyncStatus('banks', 'error'); }
   
@@ -1449,16 +1969,10 @@ async function manualSync() {
       recordsMsg = '已上传本地';
     } else {
       const data = JSON.parse(text);
-      if ((data.updatedAt || 0) > meta.records.lastModified) {
-        await importRecordsData(data);
-        meta.records.lastModified = data.updatedAt; setCloudMeta(meta);
-        recordsMsg = '已从云端更新';
-      } else if (syncState.records.dirty) {
-        await doSyncRecordsToCloud();
-        recordsMsg = '已上传本地';
-      } else {
-        recordsMsg = '已是最新';
-      }
+      const merged = await mergeRecordsData(data);
+      meta.records.lastModified = Math.max(meta.records.lastModified || 0, data.updatedAt || 0); setCloudMeta(meta);
+      await doSyncRecordsToCloud();
+      recordsMsg = merged.changed ? '已合并云端数据' : '已是最新';
     }
   } catch(e) { console.error(e); recordsMsg = '失败'; syncState.records.lastError = classifySyncError(e).message; updateSyncStatus('records', 'error'); }
   
@@ -1580,8 +2094,14 @@ async function importAllData(file) {
         tx.objectStore(store).clear();
         await new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); });
       }
-      for (const item of (data.banks || [])) await dbAdd('banks', item).catch(() => dbPut('banks', item));
-      for (const item of (data.questions || [])) await dbAdd('questions', item).catch(() => dbPut('questions', item));
+      for (const item of (data.banks || [])) {
+        const bank = normalizeBankForStore(item);
+        if (bank) await dbAdd('banks', bank).catch(() => dbPut('banks', bank));
+      }
+      for (const item of (data.questions || [])) {
+        const question = normalizeQuestionForStore(item);
+        if (question) await dbAdd('questions', question).catch(() => dbPut('questions', question));
+      }
       for (const item of (data.records || [])) await dbAdd('records', item).catch(() => dbPut('records', item));
 
       if (data.practiceProgress != null) localStorage.setItem(PROGRESS_KEY, JSON.stringify(data.practiceProgress)); else localStorage.removeItem(PROGRESS_KEY);
@@ -1660,11 +2180,102 @@ function switchPage(pageName) {
 }
 
 // ========== 工具函数 ==========
+// HTML 转义：同时转义引号，既能放在文本节点，也能安全放进 title="..." 之类的属性里。
+// （旧实现用 div.textContent + innerHTML，不会转义双引号，属性里可以被拼接注入。）
 function escapeHtml(str) {
-  if (!str) return '';
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// 把任意值编码成可安全嵌入 onXXX="fn(...)" 的 JS 字符串参数。
+// 先 JSON 编码（处理引号、反斜杠、换行），再做 HTML 转义（避免提前闭合属性）。
+function jsArg(value) {
+  const text = (value === null || value === undefined) ? '' : String(value);
+  return escapeHtml(JSON.stringify(text));
+}
+
+// ========== Markdown 输出消毒（防 XSS） ==========
+// marked 默认会把原始 HTML 原样输出，AI 解析、题库解析里只要出现
+// <img src=x onerror=...> 这类内容，交给 innerHTML 就会执行。
+// 这里用 DOMParser（惰性文档：不执行脚本、不加载资源）解析，再按白名单重建 HTML。
+const SANITIZE_ALLOWED_TAGS = new Set([
+  'a', 'p', 'br', 'hr', 'strong', 'b', 'em', 'i', 'u', 's', 'del', 'code', 'pre', 'kbd', 'blockquote',
+  'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tfoot',
+  'tr', 'th', 'td', 'span', 'div', 'sub', 'sup', 'img', 'input'
+]);
+const SANITIZE_REMOVE_TAGS = [
+  'script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'form', 'button',
+  'svg', 'math', 'template', 'noscript', 'base', 'link', 'meta', 'title', 'textarea', 'select',
+  'option', 'audio', 'video', 'source', 'track', 'canvas', 'marquee', 'xmp', 'plaintext', 'listing'
+];
+const SANITIZE_ALLOWED_ATTRS = new Set([
+  'href', 'src', 'alt', 'title', 'class', 'colspan', 'rowspan', 'align', 'start', 'value',
+  'type', 'checked', 'disabled', 'rel'
+]);
+
+function isSafeUrl(url, allowDataImage) {
+  const raw = String(url === null || url === undefined ? '' : url).trim();
+  // 去掉控制字符和空白，避免 "java\tscript:" 之类绕过
+  const v = raw.replace(/[\u0000-\u0020\u007f]/g, '').toLowerCase();
+  if (!v) return false;
+  if (allowDataImage && /^data:image\/(png|jpe?g|gif|webp);base64,/.test(v)) return true;
+  if (/^(https?:|mailto:|tel:)/.test(v)) return true;
+  if (/^[a-z][a-z0-9+.-]*:/.test(v)) return false; // javascript:/data:/vbscript: 等一律拒绝
+  return true; // 相对地址、锚点
+}
+
+function sanitizeHtml(html) {
+  const text = String(html === null || html === undefined ? '' : html);
+  if (!text) return '';
+  let doc;
+  try {
+    doc = new DOMParser().parseFromString(text, 'text/html');
+  } catch (e) {
+    return escapeHtml(text);
+  }
+  if (!doc || !doc.body) return escapeHtml(text);
+
+  // 1) 整段删除危险标签（连同内容）
+  doc.body.querySelectorAll(SANITIZE_REMOVE_TAGS.join(',')).forEach(el => el.remove());
+
+  // 2) 白名单之外的标签：去掉标签、保留文字
+  Array.prototype.slice.call(doc.body.querySelectorAll('*')).forEach(el => {
+    if (!SANITIZE_ALLOWED_TAGS.has(el.tagName.toLowerCase())) {
+      el.replaceWith(doc.createTextNode(el.textContent || ''));
+    }
+  });
+
+  // 3) 属性白名单：丢弃所有 on* / style / id / srcdoc 等，并校验 URL
+  Array.prototype.slice.call(doc.body.querySelectorAll('*')).forEach(el => {
+    const tag = el.tagName.toLowerCase();
+    Array.prototype.slice.call(el.attributes).forEach(attr => {
+      const name = attr.name.toLowerCase();
+      const isDangerous = name.indexOf('on') === 0 || name === 'style' || name === 'id' ||
+                          name === 'srcdoc' || name === 'formaction';
+      if (isDangerous || !SANITIZE_ALLOWED_ATTRS.has(name)) {
+        el.removeAttribute(attr.name);
+        return;
+      }
+      if (name === 'href' || name === 'src') {
+        if (!isSafeUrl(attr.value, name === 'src' && tag === 'img')) el.removeAttribute(attr.name);
+      }
+    });
+    if (tag === 'a' && el.getAttribute('href')) {
+      el.setAttribute('rel', 'noopener noreferrer');
+    }
+    if (tag === 'input') {
+      // 只允许 Markdown 任务列表的只读复选框
+      if ((el.getAttribute('type') || '').toLowerCase() !== 'checkbox') { el.remove(); return; }
+      el.setAttribute('disabled', '');
+    }
+  });
+
+  return doc.body.innerHTML;
 }
 
 function formatAnswer(answer) {
@@ -1915,13 +2526,13 @@ async function loadBanks() {
             ${bank.totalRounds ? `<span class="text-gray-400">已刷 ${bank.totalRounds} 轮</span>` : ''}
           </div>
           <div class="flex gap-2">
-            <button class="flex-1 px-3 py-2 text-sm bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition font-medium" onclick="viewBankDetail('${bank.id}')">
+            <button class="flex-1 px-3 py-2 text-sm bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition font-medium" onclick="viewBankDetail(${jsArg(bank.id)})">
               查看详情
             </button>
-            <button class="px-3 py-2 text-sm text-green-600 bg-green-50 rounded-lg hover:bg-green-100 transition" onclick="reimportBank('${bank.id}')" title="重新导入补完">
+            <button class="px-3 py-2 text-sm text-green-600 bg-green-50 rounded-lg hover:bg-green-100 transition" onclick="reimportBank(${jsArg(bank.id)})" title="重新导入补完">
               🔄
             </button>
-            <button class="px-3 py-2 text-sm text-red-500 bg-red-50 rounded-lg hover:bg-red-100 transition" onclick="deleteBank('${bank.id}')">
+            <button class="px-3 py-2 text-sm text-red-500 bg-red-50 rounded-lg hover:bg-red-100 transition" onclick="deleteBank(${jsArg(bank.id)})">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
             </button>
           </div>
@@ -2388,6 +2999,7 @@ document.getElementById('confirmImport').addEventListener('click', async () => {
       name: bankName,
       fileName: state.importPreview.fileName,
       importTime: Date.now(),
+      updatedAt: Date.now(),
       questionCount: questions.length,
       totalAttempts: 0,
       totalCorrect: 0
@@ -2436,8 +3048,9 @@ function showModal(id, show) {
 async function toggleFavorite(question) {
   if (!question) return false;
   question.isFavorited = !question.isFavorited;
+  question.updatedAt = Date.now();
   await dbPut('questions', question);
-  
+
   // 更新题库收藏计数
   const bank = await getBankById(question.bankId);
   if (bank) {
@@ -2446,6 +3059,7 @@ async function toggleFavorite(question) {
     } else {
       bank.favoritedCount = Math.max(0, (bank.favoritedCount || 0) - 1);
     }
+    bank.updatedAt = Date.now();
     await dbPut('banks', bank);
   }
   
@@ -2482,7 +3096,7 @@ async function viewBankDetail(bankId) {
           <span class="badge bg-blue-100 text-blue-700">${escapeHtml(q.type)}</span>
           ${q.isGuaranteed ? '<span class="badge bg-yellow-100 text-yellow-700">保命题</span>' : ''}
           ${q.isCaseSub ? '<span class="badge bg-purple-100 text-purple-700">案例题</span>' : ''}
-          <button class="ml-auto text-blue-500 hover:text-blue-700 text-sm" onclick="event.stopPropagation(); editQuestion('${q.id}')">✏️ 编辑</button>
+          <button class="ml-auto text-blue-500 hover:text-blue-700 text-sm" onclick="event.stopPropagation(); editQuestion(${jsArg(q.id)})">✏️ 编辑</button>
         </div>
         ${q.caseBackground ? `
           <div class="mb-3">
@@ -2493,11 +3107,11 @@ async function viewBankDetail(bankId) {
         <div class="text-gray-800 font-medium mb-3">${escapeHtml(q.question)}</div>
         <div class="space-y-1.5 text-sm text-gray-600 pl-2">
           ${optKeys.map(k => `
-            <div class="${q.answer === k ? 'text-green-600 font-medium' : ''}">${k}. ${escapeHtml(q.options[k] || '')}</div>
+            <div class="${q.answer === k ? 'text-green-600 font-medium' : ''}">${escapeHtml(k)}. ${escapeHtml(q.options[k] || '')}</div>
           `).join('')}
         </div>
         <div class="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between text-sm">
-          <span class="text-green-600 font-medium">正确答案：${formatAnswer(q.answer)}</span>
+          <span class="text-green-600 font-medium">正确答案：${escapeHtml(formatAnswer(q.answer))}</span>
           ${q.source ? `<span class="text-gray-400 text-xs">答案解析：${escapeHtml(q.source)}</span>` : ''}
         </div>
       </div>
@@ -2528,6 +3142,7 @@ async function fixBankQuestionTypes() {
       } else if (q.type === '案例题-多选') {
         q.type = '案例题-单选';
       }
+      q.updatedAt = Date.now();
       await dbPut('questions', q);
       fixedCount++;
     }
@@ -2539,6 +3154,7 @@ async function fixBankQuestionTypes() {
       } else if (q.type === '案例题-单选') {
         q.type = '案例题-多选';
       }
+      q.updatedAt = Date.now();
       await dbPut('questions', q);
       fixedCount++;
     }
@@ -2711,6 +3327,8 @@ document.getElementById('okConfirm').addEventListener('click', async () => {
     const progress = loadPracticeProgress();
     // 同步清除该题库的刷题进度
     clearPracticeProgress(pendingDeleteBankId);
+    // 记录删除标记，避免其他设备把已删除的题库又合并回来
+    addDeletedBank(pendingDeleteBankId);
     await dbDeleteByIndex('questions', 'bankId', pendingDeleteBankId);
     await dbDeleteByIndex('records', 'bankId', pendingDeleteBankId);
     await dbDelete('banks', pendingDeleteBankId);
@@ -2943,7 +3561,8 @@ async function confirmReimport() {
           isMulti: newQ.isMulti,
           isGuaranteed: newQ.isGuaranteed,
           caseBackground: newQ.caseBackground,
-          isCaseSub: newQ.isCaseSub
+          isCaseSub: newQ.isCaseSub,
+          updatedAt: Date.now()
         };
         await dbPut('questions', updatedQ);
         updatedCount++;
@@ -3096,6 +3715,7 @@ async function saveQuestionEdit() {
   q.source = source;
   q.isGuaranteed = isGuaranteed;
   q.isMulti = isMulti;
+  q.updatedAt = Date.now();
   // caseBackground 和 isCaseSub 保持原样（案例背景不能通过单题编辑修改）
 
   await dbPut('questions', q);
@@ -3286,10 +3906,10 @@ async function loadPracticeBanks() {
               </div>
             </div>
             <div class="flex flex-col items-end gap-1.5 flex-shrink-0 ml-2">
-              <button class="px-3 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition font-medium shadow-sm" onclick="event.stopPropagation(); resumePractice('${bank.id}')">
+              <button class="px-3 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition font-medium shadow-sm" onclick="event.stopPropagation(); resumePractice(${jsArg(bank.id)})">
                 继续
               </button>
-              <button class="text-xs text-amber-600 hover:text-amber-800" onclick="event.stopPropagation(); clearSingleProgress('${bank.id}')">
+              <button class="text-xs text-amber-600 hover:text-amber-800" onclick="event.stopPropagation(); clearSingleProgress(${jsArg(bank.id)})">
                 清除
               </button>
             </div>
@@ -3327,7 +3947,7 @@ async function loadPracticeBanks() {
   listEl.innerHTML = progressHtml + banks.map(bank => {
     const hasProgress = progressBankIds.has(bank.id);
     return `
-    <div class="bg-white rounded-xl border border-gray-200 p-5 hover:border-blue-400 hover:shadow-md transition cursor-pointer ${hasProgress ? 'ring-1 ring-amber-300' : ''}" onclick="startPractice('${bank.id}')">
+    <div class="bg-white rounded-xl border border-gray-200 p-5 hover:border-blue-400 hover:shadow-md transition cursor-pointer ${hasProgress ? 'ring-1 ring-amber-300' : ''}" onclick="startPractice(${jsArg(bank.id)})">
       <div class="flex items-center gap-4">
         <div class="w-14 h-14 bg-gradient-to-br from-blue-400 to-blue-600 rounded-xl flex items-center justify-center text-white shadow">
           <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -3525,11 +4145,11 @@ function renderQuestion() {
   optionsEl.innerHTML = selectAllHtml + optKeys.map(key => {
     const text = q.options[key] || '';
     return `
-      <div class="question-option flex items-start gap-3 p-4 border border-gray-200 rounded-lg cursor-pointer" data-option="${key}" onclick="selectOption('${key}')">
+      <div class="question-option flex items-start gap-3 p-4 border border-gray-200 rounded-lg cursor-pointer" data-option="${escapeHtml(key)}" onclick="selectOption(${jsArg(key)})">
         <div class="w-7 h-7 ${isMulti ? 'rounded-md' : 'rounded-full'} border-2 border-gray-300 flex items-center justify-center flex-shrink-0 font-medium text-sm text-gray-500 option-label">
           ${isMulti ? '✓' : key}
         </div>
-        <div class="flex-1 text-gray-700 pt-0.5"><span class="font-medium text-gray-500 mr-1">${key}.</span>${escapeHtml(text)}</div>
+        <div class="flex-1 text-gray-700 pt-0.5"><span class="font-medium text-gray-500 mr-1">${escapeHtml(key)}.</span>${escapeHtml(text)}</div>
       </div>
     `;
   }).join('');
@@ -3577,8 +4197,8 @@ function renderQuestion() {
             <span class="font-bold text-red-700">回答错误</span>
           </div>
           <div class="mt-2 text-red-700 text-sm space-y-1">
-            <div>你的答案：<span class="font-bold">${yourAnswer}</span></div>
-            <div>正确答案：<span class="font-bold">${correctAnswer}</span></div>
+            <div>你的答案：<span class="font-bold">${escapeHtml(yourAnswer)}</span></div>
+            <div>正确答案：<span class="font-bold">${escapeHtml(correctAnswer)}</span></div>
             ${q.isMulti ? `<div class="text-xs text-red-500">${savedAnswer.selected && savedAnswer.selected.length < answerArr.length ? '漏选了正确选项' : '选了错误选项'}</div>` : ''}
           </div>
         </div>
@@ -4013,7 +4633,7 @@ async function loadWrongBankList() {
       const favPercent = total > 0 ? Math.round((favCount / total) * 100) : 0;
 
       return `
-        <div class="bg-white rounded-xl border border-gray-200 p-5 hover:border-yellow-400 hover:shadow-md transition cursor-pointer" onclick="openFavoriteBank('${bank.id}')">
+        <div class="bg-white rounded-xl border border-gray-200 p-5 hover:border-yellow-400 hover:shadow-md transition cursor-pointer" onclick="openFavoriteBank(${jsArg(bank.id)})">
           <div class="flex items-start gap-4">
             <div class="w-14 h-14 bg-gradient-to-br from-yellow-400 to-yellow-600 rounded-xl flex items-center justify-center text-white shadow flex-shrink-0">
               <svg class="w-7 h-7" fill="currentColor" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>
@@ -4108,7 +4728,7 @@ async function loadWrongBankList() {
     const borderHover = allMastered ? 'hover:border-green-400' : 'hover:border-red-400';
 
     return `
-      <div class="bg-white rounded-xl border border-gray-200 p-5 ${borderHover} hover:shadow-md transition cursor-pointer" onclick="openWrongBank('${bank.id}')">
+      <div class="bg-white rounded-xl border border-gray-200 p-5 ${borderHover} hover:shadow-md transition cursor-pointer" onclick="openWrongBank(${jsArg(bank.id)})">
         <div class="flex items-start gap-4">
           <div class="w-14 h-14 bg-gradient-to-br ${iconGradient} rounded-xl flex items-center justify-center text-white shadow flex-shrink-0">
             ${allMastered
@@ -4390,14 +5010,14 @@ async function openFavoriteBank(bankId) {
               const isCorrect = answerArr.includes(key);
               return `
                 <div class="flex items-start gap-2 text-sm ${isCorrect ? 'text-green-700' : 'text-gray-600'}">
-                  <span class="font-medium">${key}.</span>
+                  <span class="font-medium">${escapeHtml(key)}.</span>
                   <span>${escapeHtml(q.options[key] || '')}</span>
                   ${isCorrect ? '<span class="text-green-600 font-medium ml-1">✓</span>' : ''}
                 </div>
               `;
             }).join('')}
           </div>
-          <div class="mt-3 text-sm text-green-600 font-medium">正确答案：${formatAnswer(q.answer)}</div>
+          <div class="mt-3 text-sm text-green-600 font-medium">正确答案：${escapeHtml(formatAnswer(q.answer))}</div>
         </div>
       `;
     }).join('');
@@ -4739,14 +5359,14 @@ function renderWrongReviewList() {
             <div class="space-y-1.5 text-sm text-gray-600 mb-3">
               ${optKeys.map(k => `
                 <div class="flex items-start gap-2 ${q.answer.includes(k) ? 'text-green-600 font-medium' : ''}">
-                  <span>${k}.</span>
+                  <span>${escapeHtml(k)}.</span>
                   <span class="flex-1">${escapeHtml(q.options[k] || '')}</span>
                   ${q.answer.includes(k) ? '<span class="text-green-500">✓</span>' : ''}
                 </div>
               `).join('')}
             </div>
             <div class="flex items-center justify-between pt-3 border-t border-gray-200">
-              <span class="text-sm text-green-600 font-medium">正确答案：${formatAnswer(q.answer)}</span>
+              <span class="text-sm text-green-600 font-medium">正确答案：${escapeHtml(formatAnswer(q.answer))}</span>
             </div>
             ${q.source ? `<div class="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
               <div class="text-xs font-medium text-blue-700 mb-1">💡 答案解析</div>
@@ -4860,14 +5480,14 @@ function renderWrongReviewList() {
             <div class="space-y-1.5 text-sm text-gray-600 mb-3">
               ${optKeys.map(k => `
                 <div class="flex items-start gap-2 ${q.answer.includes(k) ? 'text-green-600 font-medium' : ''}">
-                  <span>${k}.</span>
+                  <span>${escapeHtml(k)}.</span>
                   <span class="flex-1">${escapeHtml(q.options[k] || '')}</span>
                   ${q.answer.includes(k) ? '<span class="text-green-500">✓</span>' : ''}
                 </div>
               `).join('')}
             </div>
             <div class="flex items-center justify-between pt-3 border-t border-gray-200">
-              <span class="text-sm text-green-600 font-medium">正确答案：${formatAnswer(q.answer)}</span>
+              <span class="text-sm text-green-600 font-medium">正确答案：${escapeHtml(formatAnswer(q.answer))}</span>
             </div>
             ${q.source ? `<div class="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
               <div class="text-xs font-medium text-blue-700 mb-1">💡 答案解析</div>
@@ -5079,11 +5699,11 @@ function renderWrongPracticeQuestion() {
   optionsEl.innerHTML = selectAllHtml + optKeys.map(key => {
     const text = q.options[key] || '';
     return `
-      <div class="question-option flex items-start gap-3 p-4 border border-gray-200 rounded-lg cursor-pointer" data-option="${key}" onclick="selectWrongOption('${key}')">
+      <div class="question-option flex items-start gap-3 p-4 border border-gray-200 rounded-lg cursor-pointer" data-option="${escapeHtml(key)}" onclick="selectWrongOption(${jsArg(key)})">
         <div class="w-7 h-7 ${isMulti ? 'rounded-md' : 'rounded-full'} border-2 border-gray-300 flex items-center justify-center flex-shrink-0 font-medium text-sm text-gray-500 option-label">
           ${isMulti ? '✓' : key}
         </div>
-        <div class="flex-1 text-gray-700 pt-0.5"><span class="font-medium text-gray-500 mr-1">${key}.</span>${escapeHtml(text)}</div>
+        <div class="flex-1 text-gray-700 pt-0.5"><span class="font-medium text-gray-500 mr-1">${escapeHtml(key)}.</span>${escapeHtml(text)}</div>
       </div>
     `;
   }).join('');
@@ -5131,8 +5751,8 @@ function renderWrongPracticeQuestion() {
             <span class="font-bold text-red-700">回答错误</span>
           </div>
           <div class="mt-2 text-red-700 text-sm space-y-1">
-            <div>你的答案：<span class="font-bold">${yourAnswer}</span></div>
-            <div>正确答案：<span class="font-bold">${correctAnswer}</span></div>
+            <div>你的答案：<span class="font-bold">${escapeHtml(yourAnswer)}</span></div>
+            <div>正确答案：<span class="font-bold">${escapeHtml(correctAnswer)}</span></div>
           </div>
         </div>
         ${q.source ? `
@@ -5489,7 +6109,7 @@ function renderWrongViewQuestion() {
           ${isMulti ? '✓' : key}
         </div>
         <div class="flex-1 ${isCorrect ? 'text-green-800' : 'text-gray-700'} pt-0.5">
-          <span class="font-medium ${isCorrect ? 'text-green-600' : 'text-gray-500'} mr-1">${key}.</span>${escapeHtml(text)}
+          <span class="font-medium ${isCorrect ? 'text-green-600' : 'text-gray-500'} mr-1">${escapeHtml(key)}.</span>${escapeHtml(text)}
           ${isCorrect ? '<span class="ml-2 text-green-600 font-medium">✓ 正确选项</span>' : ''}
         </div>
       </div>
@@ -5787,7 +6407,7 @@ function addAIMessagePlaceholder() {
 // Markdown + KaTeX 公式渲染
 function renderMarkdown(text) {
   if (!text) return '';
-  
+
   // 配置 marked
   if (window.marked && marked.setOptions) {
     marked.setOptions({
@@ -5797,47 +6417,55 @@ function renderMarkdown(text) {
       mangle: false
     });
   }
-  
+
   // 提取公式（先处理块级 $$...$$，再处理行内 $...$）
+  // 注意：占位符只能用【字母+数字】。旧版用 __MATH_PLACEHOLDER_0__，
+  // 会被 markdown 当成“加粗”改写成 <strong>...</strong>，公式就换不回来了。
   const placeholders = [];
-  let processed = text;
-  
+  const token = 'KATEXPLACEHOLDER' + Math.random().toString(36).slice(2, 8) + 'X';
+  const stashMath = (mathHtml) => {
+    placeholders.push(mathHtml);
+    return token + (placeholders.length - 1) + 'Z';
+  };
+  let processed = String(text);
+
   // 1. 块级公式 $$...$$
   processed = processed.replace(/\$\$([\s\S]+?)\$\$/g, (match, formula) => {
     try {
-      const html = katex.renderToString(formula.trim(), {
+      return stashMath(katex.renderToString(formula.trim(), {
         throwOnError: false,
-        displayMode: true
-      });
-      placeholders.push(html);
-      return `__MATH_PLACEHOLDER_${placeholders.length - 1}__`;
+        displayMode: true,
+        trust: false
+      }));
     } catch (e) {
       return match; // 渲染失败就保留原文
     }
   });
-  
+
   // 2. 行内公式 $...$
   processed = processed.replace(/\$([^\n$]+?)\$/g, (match, formula) => {
     try {
-      const html = katex.renderToString(formula.trim(), {
+      return stashMath(katex.renderToString(formula.trim(), {
         throwOnError: false,
-        displayMode: false
-      });
-      placeholders.push(html);
-      return `__MATH_PLACEHOLDER_${placeholders.length - 1}__`;
+        displayMode: false,
+        trust: false
+      }));
     } catch (e) {
       return match;
     }
   });
-  
+
   // 3. 渲染 Markdown
   let html = window.marked ? marked.parse(processed) : escapeHtml(processed).replace(/\n/g, '<br>');
-  
-  // 4. 把占位符换回公式 HTML
+
+  // 3.5 消毒：marked 会原样输出 HTML，必须先过滤再交给 innerHTML
+  html = sanitizeHtml(html);
+
+  // 4. 把占位符换回公式 HTML（用函数替换，避免公式里的 $& 被当成替换模式）
   placeholders.forEach((mathHtml, i) => {
-    html = html.replace(`__MATH_PLACEHOLDER_${i}__`, mathHtml);
+    html = html.replace(token + i + 'Z', () => mathHtml);
   });
-  
+
   return html;
 }
 
@@ -6248,6 +6876,7 @@ async function saveAIToSource(text, isAppend, questionText) {
   
   // 更新当前题目对象
   q.source = newSource;
+  q.updatedAt = Date.now();
   await dbPut('questions', q);
   
   // 同步更新所有内存中的同 ID 题目（避免其他页面显示旧解析）
@@ -6509,52 +7138,21 @@ async function init() {
   refreshSyncBadge();
   const verEl = document.getElementById('appVersion');
   if (verEl) verEl.textContent = APP_VERSION;
-  
-  // 初始化云端同步（容错：就算云同步挂了也不影响主功能）
-  try {
-    if (cloudEnabled) {
-      const result = await syncFromCloud();
-      if (result.success) {
-        console.log('从云端同步数据成功');
-      } else if (result.reason === 'no_data') {
-        // 只有确认云端确实为空（404）时，才允许把本地数据传上去
-        const localBanks = await dbGetAll('banks');
-        if (localBanks.length > 0) {
-          console.log('云端无数据，上传本地数据');
-          doSyncBanksToCloud();
-          doSyncRecordsToCloud();
-        } else {
-          console.log('云端与本地均无数据，跳过上传');
-        }
-      } else if (result.reason === 'network_error') {
-        // 网络/服务异常时绝不上传，避免本地空数据覆盖云端备份
-        console.warn('云端暂时无法访问，本次不上传本地数据');
-        const localBanks = await dbGetAll('banks');
-        if (localBanks.length === 0) {
-          alert('云端连接失败，且本地暂无题库数据。\n\n请检查网络后刷新页面重试。\n在此之前请勿清除浏览器数据，否则可能丢失云端备份的恢复机会。');
-        }
-      }
-    }
-  } catch(e) {
-    console.warn('云端同步初始化失败，继续使用本地模式:', e);
-    cloudEnabled = false;
-    updateSyncStatus('banks', 'idle');
-    updateSyncStatus('records', 'idle');
-  }
-  
+
+  // 1) 先用本地数据渲染，避免等待云端造成白屏
   loadBanks();
   checkOnline();
   updateAIFloatingBtn();
   initFABDraggable();
-  
+
   // 恢复上次的页面
   let savedPage = 'banks';
   try { savedPage = localStorage.getItem('current_page') || 'banks'; } catch(e) {}
-  
+
   // 检查是否有正在进行的刷题
   let activeBank = null;
   try { activeBank = localStorage.getItem('practice_active_bank'); } catch(e) {}
-  
+
   if (activeBank) {
     // 有正在进行的刷题，直接恢复
     savedPage = 'practice';
@@ -6565,6 +7163,50 @@ async function init() {
     }, 100);
   } else if (savedPage !== 'banks') {
     switchPage(savedPage);
+  }
+
+  // 2) 后台执行云端同步，不阻塞首屏
+  runStartupCloudSync();
+}
+
+// 启动时的云端同步（容错：就算云同步挂了也不影响主功能）
+async function runStartupCloudSync() {
+  if (!cloudEnabled) return;
+  try { await initAuth(); } catch(e) { console.warn('初始化云端登录态失败:', e); }
+  try {
+    const result = await syncFromCloud();
+    if (result.success) {
+      console.log('从云端同步数据成功');
+      // 云端有更新，刷新当前视图
+      await loadBanks();
+      if (state.detailBankId) viewBankDetail(state.detailBankId);
+    } else if (result.reason === 'no_data') {
+      // 只有确认云端确实为空（404）时，才允许把本地数据传上去
+      const localBanks = await dbGetAll('banks');
+      if (localBanks.length > 0) {
+        console.log('云端无数据，上传本地数据');
+        doSyncBanksToCloud();
+        doSyncRecordsToCloud();
+      } else {
+        console.log('云端与本地均无数据，跳过上传');
+      }
+    } else if (result.reason === 'network_error') {
+      // 网络/服务异常时绝不上传，避免本地空数据覆盖云端备份
+      console.warn('云端暂时无法访问，本次不上传本地数据');
+      const localBanks = await dbGetAll('banks');
+      if (localBanks.length === 0) {
+        alert('云端连接失败，且本地暂无题库数据。\n\n请检查网络后刷新页面重试。\n在此之前请勿清除浏览器数据，否则可能丢失云端备份的恢复机会。');
+      }
+    }
+
+    // 本地存在云端没有的内容（例如另一台设备未同步的新增），回传一次
+    if (result.banksNeedUpload) scheduleBanksSync();
+    if (result.recordsNeedUpload) scheduleRecordsSync();
+  } catch(e) {
+    console.warn('云端同步初始化失败，继续使用本地模式:', e);
+    cloudEnabled = false;
+    updateSyncStatus('banks', 'idle');
+    updateSyncStatus('records', 'idle');
   }
 }
 
@@ -6654,8 +7296,8 @@ init();
     <h3 class="text-lg font-bold text-gray-800 mb-4">AI 助手设置</h3>
     <div class="mb-4">
       <label class="block text-sm font-medium text-gray-700 mb-1">DeepSeek API Key</label>
-      <input type="password" id="aiApiKey" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm" placeholder="sk-...">
-      <p class="text-xs text-gray-400 mt-1">在 deepseek.com 注册后获取，Key 仅保存在你的浏览器本地</p>
+      <input type="password" id="aiApiKey" autocomplete="off" spellcheck="false" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm" placeholder="sk-...">
+      <p class="text-xs text-gray-400 mt-1">在 deepseek.com 注册后获取。Key 只存在本机浏览器里，但页面上任何被打进来的脚本都能读到它；请勿在公共电脑上保存，建议给这个 Key 单独设置额度上限。</p>
     </div>
     <div class="mb-4">
       <label class="block text-sm font-medium text-gray-700 mb-1">模型</label>
