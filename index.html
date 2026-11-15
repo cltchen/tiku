@@ -120,7 +120,7 @@
       <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
     </button>
     <span class="ml-2 font-bold text-gray-800 text-base">题库刷题助手</span>
-    <div id="cloudSyncStatusMobile" class="ml-auto cursor-pointer" onclick="manualSync()" title="点击手动同步"></div>
+    <div id="cloudSyncStatusMobile" class="ml-auto cursor-pointer" onclick="openSyncPanel()" title="点击查看同步状态"></div>
   </header>
 
 <div id="app" class="flex h-screen">
@@ -157,7 +157,7 @@
         <button onclick="openAuthModal()" class="text-blue-500 hover:underline">云端账号</button>
       </div>
       <div id="appVersion" class="text-center text-gray-300 mb-1" style="font-size:11px"></div>
-      <div id="cloudSyncStatus" class="flex items-center justify-center gap-1 cursor-pointer hover:text-gray-600 transition" onclick="manualSync()" title="点击手动同步">
+      <div id="cloudSyncStatus" class="flex items-center justify-center gap-1 cursor-pointer hover:text-gray-600 transition" onclick="openSyncPanel()" title="点击查看同步状态">
         <span class="text-gray-400">☁️ 云端同步</span>
       </div>
     </div>
@@ -165,6 +165,16 @@
 
   <!-- 主内容区 -->
   <main class="flex-1 overflow-auto scrollbar-thin">
+
+    <!-- 备份提醒（超过 7 天没导出时出现，所有页面都可见） -->
+    <div id="exportReminder" class="hidden sticky top-0 z-30">
+      <div class="bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center gap-3 text-sm text-amber-800">
+        <span class="flex-shrink-0">📦</span>
+        <span id="exportReminderText" class="flex-1 min-w-0 leading-snug">已经有一段时间没有导出备份了</span>
+        <button onclick="exportDataFromReminder()" class="px-3 py-1 bg-amber-500 text-white rounded-lg text-xs font-medium hover:bg-amber-600 transition flex-shrink-0">立即导出</button>
+        <button onclick="dismissExportReminder()" class="text-amber-400 hover:text-amber-600 text-xl leading-none flex-shrink-0" title="本次打开期间不再提醒">×</button>
+      </div>
+    </div>
 
     <!-- 题库管理页面 -->
     <section id="page-banks" class="page p-8 fade-in">
@@ -190,6 +200,17 @@
               <input type="file" id="fileInput" accept=".xlsx,.xls" class="hidden">
               <input type="file" id="reimportFileInput" accept=".xlsx,.xls" class="hidden">
             </label>
+          </div>
+        </div>
+
+        <!-- 搜索：题库名称过滤 + 跨题库题目搜索 -->
+        <div class="mb-4">
+          <div class="relative">
+            <svg class="w-5 h-5 text-gray-400 absolute left-3 top-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z"/></svg>
+            <input id="bankSearchInput" type="search" autocomplete="off" placeholder="搜索题库名称，或输入题目关键词跨题库查找…" class="w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm bg-white">
+          </div>
+          <div id="globalSearchResult" class="hidden mt-3 bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+            <div id="globalSearchList"></div>
           </div>
         </div>
 
@@ -223,8 +244,19 @@
       <div class="max-w-4xl mx-auto">
         <!-- 选择题库 -->
         <div id="practiceSelect">
-          <h2 class="text-2xl font-bold text-gray-800 mb-2">开始刷题</h2>
-          <p class="text-gray-500 mb-6">选择一个题库开始练习</p>
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between mb-6">
+            <div>
+              <h2 class="text-2xl font-bold text-gray-800 mb-2">开始刷题</h2>
+              <p class="text-gray-500">选择一个题库开始练习</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-sm text-gray-500">刷题顺序</span>
+              <div class="inline-flex items-center gap-1 p-1 bg-gray-100 rounded-lg text-sm" data-order-toggle>
+                <button type="button" data-order="seq" onclick="setPracticeOrder('seq')" class="px-3 py-1.5 rounded-md transition">顺序</button>
+                <button type="button" data-order="shuffle" onclick="setPracticeOrder('shuffle')" class="px-3 py-1.5 rounded-md transition">乱序</button>
+              </div>
+            </div>
+          </div>
           <div id="practiceBankList" class="grid gap-4 md:grid-cols-2">
             <!-- 动态填充 -->
           </div>
@@ -388,7 +420,14 @@
                 <p class="text-gray-500 mt-1" id="wrongDetailStats">共 X 道错题</p>
               </div>
             </div>
-            <div class="flex gap-2">
+            <div class="flex gap-2 items-center flex-wrap justify-end">
+              <div class="flex items-center gap-1.5 mr-1">
+                <span class="text-xs text-gray-400">专刷顺序</span>
+                <div class="inline-flex items-center p-0.5 bg-gray-100 rounded-md text-xs" data-order-toggle>
+                  <button type="button" data-order="seq" onclick="setPracticeOrder('seq')" class="px-2 py-1 rounded transition">顺序</button>
+                  <button type="button" data-order="shuffle" onclick="setPracticeOrder('shuffle')" class="px-2 py-1 rounded transition">乱序</button>
+                </div>
+              </div>
               <button id="wrongListMode" class="px-4 py-2 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition text-sm font-medium">
                 📋 列表
               </button>
@@ -717,6 +756,9 @@
         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
       </button>
     </div>
+    <div class="px-6 pt-3 pb-2 border-b border-gray-100 bg-gray-50/60">
+      <input id="detailSearchInput" type="search" autocomplete="off" placeholder="在本题库内搜索题干 / 选项 / 答案解析…" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm bg-white">
+    </div>
     <div class="p-6 overflow-auto scrollbar-thin flex-1" id="detailQuestions">
       <!-- 题目列表 -->
     </div>
@@ -772,7 +814,7 @@
       <h3 class="text-lg font-bold text-gray-800">云端账号</h3>
       <button onclick="showModal('authModal', false)" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
     </div>
-    <p class="text-xs text-gray-400 mb-4">仅在把 Supabase 存储桶设为「私有」后需要登录。默认公开桶可留空不登录。</p>
+    <p class="text-xs text-gray-400 mb-4">云端数据只对已登录的账号开放，请保持登录状态；未登录时无法读取或上传。</p>
     <div id="authStatus" class="text-xs text-gray-500 mb-3"></div>
     <input id="authEmail" type="email" placeholder="邮箱" autocomplete="username" class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-2 text-sm">
     <input id="authPassword" type="password" placeholder="密码" autocomplete="current-password" class="w-full px-3 py-2 border border-gray-300 rounded-lg mb-3 text-sm">
@@ -780,6 +822,17 @@
       <button id="authLogoutBtn" onclick="doCloudLogout()" class="flex-1 px-4 py-2 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm">退出登录</button>
       <button onclick="doCloudLogin()" class="flex-1 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-sm">登录</button>
     </div>
+  </div>
+</div>
+
+<!-- 云端同步状态面板 -->
+<div id="syncPanelModal" class="modal-overlay hidden">
+  <div class="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-5">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-lg font-bold text-gray-800">云端同步</h3>
+      <button onclick="closeSyncPanel()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <div id="syncPanelBody" class="space-y-3 text-sm"></div>
   </div>
 </div>
 
@@ -1132,7 +1185,7 @@ const BANKS_MAX_WAIT_MS = 600000;   // 题库持续改动时，最多累计 10 �
 const RECORDS_THROTTLE_MS = 300000; // 记录改动：5 分钟批量上传一次
 const EXIT_FLUSH_MIN_AGE_MS = 60000; // 切到后台时，改动不足 1 分钟不触发上传（避免频繁切换 App 反复上传）
 
-const APP_VERSION = '云端同步版 v2.3'; // 当前页面版本标识
+const APP_VERSION = '云端同步版 v2.4'; // 当前页面版本标识（v2.4：安全加固 + 刷题顺序 / 搜索 / 同步面板 / 备份提醒）
 
 const MAX_RETRIES = 3;         // 同步失败自动重试次数
 const RETRY_BASE_MS = 10000;   // 重试基础间隔（10s → 20s → 40s 指数退避）
@@ -1771,6 +1824,7 @@ async function doSyncBanksToCloud() {
     const meta = getCloudMeta();
     meta.banks.lastModified = data.updatedAt;
     setCloudMeta(meta);
+    markSyncedAt();
     updateSyncStatus('banks', 'synced');
     setTimeout(() => { if (syncState.banks.status === 'synced') updateSyncStatus('banks', 'idle'); }, 3000);
   } catch(e) {
@@ -1799,6 +1853,7 @@ async function doSyncRecordsToCloud() {
     const meta = getCloudMeta();
     meta.records.lastModified = data.updatedAt;
     setCloudMeta(meta);
+    markSyncedAt();
     updateSyncStatus('records', 'synced');
     setTimeout(() => { if (syncState.records.status === 'synced') updateSyncStatus('records', 'idle'); }, 3000);
   } catch(e) {
@@ -1928,7 +1983,7 @@ function refreshSyncBadge() {
   const s = statusMap[overall] || statusMap.idle;
   const tip = (overall === 'error' && detail) ? `（${detail}）` : '';
   const html = `<span style="color:${s.color};font-size:12px">${s.icon} ${s.text}${tip}</span>`;
-  const title = overall === 'error' ? (detail || '点击重试') : '点击手动同步';
+  const title = overall === 'error' ? (detail || '点击重试') : '点击查看同步状态';
   
   const desktopEl = document.getElementById('cloudSyncStatus');
   if (desktopEl) { desktopEl.innerHTML = html; desktopEl.title = title; }
@@ -1936,13 +1991,15 @@ function refreshSyncBadge() {
   if (mobileEl) { mobileEl.innerHTML = html; mobileEl.title = title; }
 }
 
-// 手动同步
-async function manualSync() {
+// 手动同步：silent=true 时不弹确认框、不弹结果框，返回 { ok, message } 给调用方
+async function manualSync(options) {
+  const silent = !!(options && options.silent);
   if (!cloudEnabled) {
+    if (silent) return { ok: false, message: '云端同步未启用' };
     alert('云端同步未启用');
     return;
   }
-  if (!confirm('将拉取云端数据并与本地合并（不会覆盖），再把合并结果上传，是否继续？')) return;
+  if (!silent && !confirm('将拉取云端数据并与本地合并（不会覆盖），再把合并结果上传，是否继续？')) return;
   
   const meta = getCloudMeta();
   
@@ -1977,7 +2034,115 @@ async function manualSync() {
   } catch(e) { console.error(e); recordsMsg = '失败'; syncState.records.lastError = classifySyncError(e).message; updateSyncStatus('records', 'error'); }
   
   await loadBanks();
-  alert(`同步完成\n题库：${banksMsg}\n记录：${recordsMsg}`);
+
+  const ok = banksMsg !== '失败' && recordsMsg !== '失败';
+  if (ok) markSyncedAt();
+  const summary = `题库：${banksMsg}\n记录：${recordsMsg}`;
+  if (silent) return { ok, message: summary };
+  alert(`同步完成\n${summary}`);
+}
+
+// ========== 同步状态面板 ==========
+const LAST_SYNC_KEY = 'cloud_last_sync_at';
+
+// 记录最近一次成功同步的时间（只存在本机）
+function markSyncedAt() {
+  try { localStorage.setItem(LAST_SYNC_KEY, String(Date.now())); } catch (e) {}
+}
+
+function formatSyncAgo(ts) {
+  const t = Number(ts) || 0;
+  if (!t) return '从未';
+  const diff = Date.now() - t;
+  if (diff < 60 * 1000) return '刚刚';
+  if (diff < 60 * 60 * 1000) return Math.floor(diff / 60000) + ' 分钟前';
+  if (diff < 24 * 60 * 60 * 1000) return Math.floor(diff / 3600000) + ' 小时前';
+  return Math.floor(diff / 86400000) + ' 天前';
+}
+
+function getOverallSyncStatus() {
+  const b = syncState.banks;
+  const r = syncState.records;
+  if (b.status === 'error' || r.status === 'error') {
+    return {
+      icon: '⚠️', text: '同步失败', color: '#ef4444',
+      detail: (b.status === 'error' ? b.lastError : r.lastError) || ''
+    };
+  }
+  if (b.status === 'syncing' || r.status === 'syncing') return { icon: '🔄', text: '同步中…', color: '#3b82f6', detail: '' };
+  if (b.dirty || r.dirty) return { icon: '⏳', text: '有改动待同步', color: '#f59e0b', detail: '' };
+  if (b.status === 'synced' || r.status === 'synced') return { icon: '✅', text: '同步完成', color: '#22c55e', detail: '' };
+  return { icon: '☁️', text: '已同步', color: '#9ca3af', detail: '' };
+}
+
+function renderSyncPanel() {
+  const body = document.getElementById('syncPanelBody');
+  if (!body) return;
+
+  const s = getAuthSession();
+  const st = getOverallSyncStatus();
+  const lastAt = Number(localStorage.getItem(LAST_SYNC_KEY) || 0);
+  const pending = [];
+  if (syncState.banks.dirty) pending.push('题库');
+  if (syncState.records.dirty) pending.push('记录');
+  const pendingText = pending.length ? pending.join('、') + ' 有改动待上传' : '无';
+
+  body.innerHTML = `
+    <div class="flex items-center justify-between gap-3 p-3 bg-gray-50 rounded-lg">
+      <div class="flex items-center gap-2 min-w-0">
+        <span class="text-lg">${st.icon}</span>
+        <div class="min-w-0">
+          <div class="font-medium" style="color:${st.color}">${st.text}</div>
+          ${st.detail ? `<div class="text-xs text-red-500 mt-0.5 break-all">${escapeHtml(st.detail)}</div>` : ''}
+        </div>
+      </div>
+      <button id="syncNowBtn" onclick="syncNowFromPanel()" class="px-3 py-1.5 text-xs bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition flex-shrink-0">立即同步</button>
+    </div>
+    <div class="space-y-1.5 pt-1">
+      <div class="flex items-center justify-between gap-3"><span class="text-gray-500">云端账号</span><span class="text-gray-700 truncate">${s ? escapeHtml(s.email || '已登录') : '未登录'}</span></div>
+      <div class="flex items-center justify-between gap-3"><span class="text-gray-500">上次成功同步</span><span class="text-gray-700">${formatSyncAgo(lastAt)}</span></div>
+      <div class="flex items-center justify-between gap-3"><span class="text-gray-500">待上传改动</span><span class="${pending.length ? 'text-amber-600' : 'text-gray-700'}">${pendingText}</span></div>
+    </div>
+    <div class="flex gap-2 pt-2">
+      <button onclick="openAuthFromSyncPanel()" class="flex-1 px-3 py-2 text-sm border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition">${s ? '账号 / 退出登录' : '登录云端账号'}</button>
+      <button onclick="openBackupFromSyncPanel()" class="flex-1 px-3 py-2 text-sm border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition">历史版本</button>
+    </div>
+    <p class="text-xs text-gray-400 pt-1 leading-relaxed">改动会先存在本机，联网后自动上传；点“立即同步”可以马上拉取并上传。</p>
+  `;
+}
+
+function openSyncPanel() {
+  renderSyncPanel();
+  showModal('syncPanelModal', true);
+}
+
+function closeSyncPanel() {
+  showModal('syncPanelModal', false);
+}
+
+async function syncNowFromPanel() {
+  const btn = document.getElementById('syncNowBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '同步中…';
+    btn.classList.add('opacity-60', 'cursor-not-allowed');
+  }
+  try {
+    await manualSync({ silent: true });
+  } catch (e) {
+    console.error('手动同步失败:', e);
+  }
+  renderSyncPanel();
+}
+
+function openAuthFromSyncPanel() {
+  closeSyncPanel();
+  openAuthModal();
+}
+
+function openBackupFromSyncPanel() {
+  closeSyncPanel();
+  openBackupModal();
 }
 
 // ========== 未同步改动检测 + 退出提醒 ==========
@@ -2073,6 +2238,84 @@ async function exportAllData() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+
+  // 记下这次导出的时间，并收起备份提醒
+  markExportedAt();
+}
+
+// ========== 备份提醒（超过 7 天没导出就提示） ==========
+const LAST_EXPORT_KEY = 'last_export_at';
+const EXPORT_REMIND_DAYS = 7;
+const EXPORT_REMIND_SNOOZE_KEY = 'export_reminder_snooze';
+
+// 距离上次备份过了多少天：优先用"上次导出时间"，没有就用最早导入的那个题库的时间
+function computeDaysSinceBackup(lastExportAt, oldestBankTime) {
+  const base = Number(lastExportAt) || Number(oldestBankTime) || Date.now();
+  const days = Math.floor((Date.now() - base) / 86400000);
+  return days > 0 ? days : 0;
+}
+
+function markExportedAt() {
+  try { localStorage.setItem(LAST_EXPORT_KEY, String(Date.now())); } catch (e) {}
+  try { sessionStorage.removeItem(EXPORT_REMIND_SNOOZE_KEY); } catch (e) {}
+  const el = document.getElementById('exportReminder');
+  if (el) el.classList.add('hidden');
+}
+
+async function checkExportReminder() {
+  const el = document.getElementById('exportReminder');
+  const textEl = document.getElementById('exportReminderText');
+  if (!el) return;
+
+  // 本次打开已经点过"稍后"，就不再打扰
+  try {
+    if (sessionStorage.getItem(EXPORT_REMIND_SNOOZE_KEY) === '1') {
+      el.classList.add('hidden');
+      return;
+    }
+  } catch (e) {}
+
+  let banks = [];
+  try { banks = await dbGetAll('banks'); } catch (e) { banks = []; }
+  if (!banks.length) {
+    el.classList.add('hidden');
+    return;
+  }
+
+  let lastExportAt = 0;
+  try { lastExportAt = Number(localStorage.getItem(LAST_EXPORT_KEY) || 0); } catch (e) {}
+  const oldestBankTime = banks.reduce((min, b) => {
+    const t = Number(b.importTime) || 0;
+    return (t && (!min || t < min)) ? t : min;
+  }, 0);
+
+  const days = computeDaysSinceBackup(lastExportAt, oldestBankTime);
+  if (days < EXPORT_REMIND_DAYS) {
+    el.classList.add('hidden');
+    return;
+  }
+
+  if (textEl) {
+    textEl.textContent = lastExportAt
+      ? `已有 ${days} 天没有导出备份，建议现在存一份到网盘或自己邮箱`
+      : `题库导入已经 ${days} 天，还没有导出过备份，建议现在存一份到网盘或自己邮箱`;
+  }
+  el.classList.remove('hidden');
+}
+
+function dismissExportReminder() {
+  try { sessionStorage.setItem(EXPORT_REMIND_SNOOZE_KEY, '1'); } catch (e) {}
+  const el = document.getElementById('exportReminder');
+  if (el) el.classList.add('hidden');
+}
+
+async function exportDataFromReminder() {
+  try {
+    await exportAllData();
+  } catch (e) {
+    console.error('导出失败:', e);
+    alert('导出失败：' + (e && e.message ? e.message : e));
+  }
 }
 
 async function importAllData(file) {
@@ -2154,7 +2397,14 @@ const state = {
     newQuestions: [], // 解析后的新题目数组
     oldCount: 0,
     newCount: 0
-  }
+  },
+  // 搜索相关
+  bankSearch: '',          // 题库管理页搜索关键词
+  detailBankId: null,      // 当前打开的题库详情
+  detailBankName: '',      // 当前题库名（渲染用）
+  detailQuestions: [],     // 当前题库全部题目（详情弹窗缓存）
+  detailSearch: '',        // 详情弹窗内搜索关键词
+  detailFocusId: null      // 从全局搜索跳转过来时，只显示这一道题
 };
 
 // ========== 页面切换 ==========
@@ -2197,6 +2447,27 @@ function escapeHtml(str) {
 function jsArg(value) {
   const text = (value === null || value === undefined) ? '' : String(value);
   return escapeHtml(JSON.stringify(text));
+}
+
+// 简单的防抖：搜索框输入时不要每敲一个字就查一次
+function debounce(fn, wait) {
+  let timer = null;
+  return function (...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn.apply(this, args); }, wait);
+  };
+}
+
+// 题目关键词匹配（题干 / 选项 / 解析 / 案例背景 / 题型），不区分大小写
+function questionMatchesKeyword(q, keyword) {
+  const kw = String(keyword || '').trim().toLowerCase();
+  if (!kw) return true;
+  if (!q) return false;
+  const parts = [q.question, q.type, q.source, q.caseBackground];
+  if (q.options && typeof q.options === 'object') {
+    Object.keys(q.options).forEach(k => parts.push(q.options[k]));
+  }
+  return parts.join(' ').toLowerCase().indexOf(kw) >= 0;
 }
 
 // ========== Markdown 输出消毒（防 XSS） ==========
@@ -2491,16 +2762,31 @@ function smartDetectColumns(rawRows) {
 
 // ========== 题库管理 ==========
 async function loadBanks() {
-  const banks = await dbGetAll('banks');
+  const allBanks = await dbGetAll('banks');
   const listEl = document.getElementById('bankList');
   const emptyEl = document.getElementById('emptyBanks');
 
-  if (banks.length === 0) {
+  if (allBanks.length === 0) {
     listEl.innerHTML = '';
     emptyEl.classList.remove('hidden');
     return;
   }
   emptyEl.classList.add('hidden');
+
+  // 按搜索关键词过滤题库（匹配名称或原始文件名）
+  const kw = String(state.bankSearch || '').trim().toLowerCase();
+  const banks = kw
+    ? allBanks.filter(b => ((b.name || '') + ' ' + (b.fileName || '')).toLowerCase().indexOf(kw) >= 0)
+    : allBanks;
+
+  if (banks.length === 0) {
+    listEl.innerHTML = `<div class="col-span-2 lg:col-span-3 text-center py-12 bg-white rounded-xl border border-gray-200">
+      <p class="text-gray-400">没有匹配「${escapeHtml(state.bankSearch)}」的题库</p>
+      <p class="text-gray-400 text-sm mt-1">换个关键词试试，或清空搜索框</p>
+    </div>`;
+    return;
+  }
+
   banks.sort((a, b) => b.importTime - a.importTime);
 
   listEl.innerHTML = banks.map(bank => {
@@ -2541,6 +2827,80 @@ async function loadBanks() {
     `;
   }).join('');
 }
+
+// ========== 搜索：题库过滤 + 跨题库搜题 ==========
+let globalSearchSeq = 0;
+
+async function renderGlobalQuestionSearch() {
+  const box = document.getElementById('globalSearchResult');
+  const listEl = document.getElementById('globalSearchList');
+  if (!box || !listEl) return;
+
+  const kw = String(state.bankSearch || '').trim();
+  if (kw.length < 2) {
+    box.classList.add('hidden');
+    listEl.innerHTML = '';
+    return;
+  }
+
+  // 防止快速输入时旧结果覆盖新结果
+  const seq = ++globalSearchSeq;
+  const banks = await dbGetAll('banks');
+  const questions = await dbGetAll('questions');
+  if (seq !== globalSearchSeq) return;
+
+  const bankNameMap = new Map(banks.map(b => [b.id, b.name]));
+  const hits = questions.filter(q => questionMatchesKeyword(q, kw));
+  const shown = hits.slice(0, 30);
+
+  box.classList.remove('hidden');
+  if (hits.length === 0) {
+    listEl.innerHTML = `<div class="px-4 py-4 text-sm text-gray-400">题目里没有找到「${escapeHtml(kw)}」</div>`;
+    return;
+  }
+
+  listEl.innerHTML = `<div class="px-4 py-2 text-xs text-gray-500 bg-gray-50 border-b border-gray-100">题目命中 ${hits.length} 条${hits.length > shown.length ? `（只显示前 ${shown.length} 条，可再输入更精确的关键词）` : ''}</div>` +
+    shown.map(q => `
+      <div class="px-4 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 cursor-pointer" onclick="openDetailFromSearch(${jsArg(q.bankId)}, ${jsArg(q.id)})">
+        <div class="flex items-center gap-2 mb-1 flex-wrap">
+          <span class="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded">${escapeHtml(bankNameMap.get(q.bankId) || '未知题库')}</span>
+          <span class="text-xs text-gray-400">${escapeHtml(q.type || '')}</span>
+        </div>
+        <div class="text-sm text-gray-700 truncate">${escapeHtml(q.question || '')}</div>
+      </div>
+    `).join('');
+}
+
+// 从搜索结果直接打开对应题库，并定位到那道题
+async function openDetailFromSearch(bankId, questionId) {
+  const input = document.getElementById('bankSearchInput');
+  if (input) input.value = '';
+  state.bankSearch = '';
+
+  const box = document.getElementById('globalSearchResult');
+  if (box) box.classList.add('hidden');
+  const listEl = document.getElementById('globalSearchList');
+  if (listEl) listEl.innerHTML = '';
+
+  await loadBanks();
+  await viewBankDetail(bankId, questionId);
+}
+
+const onBankSearchChanged = debounce(async () => {
+  await loadBanks();
+  await renderGlobalQuestionSearch();
+}, 180);
+
+document.getElementById('bankSearchInput').addEventListener('input', (e) => {
+  state.bankSearch = e.target.value;
+  onBankSearchChanged();
+});
+
+document.getElementById('detailSearchInput').addEventListener('input', debounce((e) => {
+  state.detailSearch = e.target.value;
+  state.detailFocusId = null;
+  renderDetailQuestions();
+}, 150));
 
 // ========== Excel 导入 - 预览模式 ==========
 document.getElementById('fileInput').addEventListener('change', async (e) => {
@@ -3079,15 +3439,66 @@ async function getFavoriteBanks() {
 }
 
 // ========== 题库详情 ==========
-async function viewBankDetail(bankId) {
+// focusQuestionId：从全局搜索点进来时，只显示命中的那一道题
+async function viewBankDetail(bankId, focusQuestionId, keepFilter) {
+  const keep = !!keepFilter && state.detailBankId === bankId;
   state.detailBankId = bankId;
+  if (!keep) {
+    state.detailFocusId = focusQuestionId || null;
+    state.detailSearch = '';
+  }
+
   const bank = await getBankById(bankId);
   const questions = await dbGetByIndex('questions', 'bankId', bankId);
 
-  document.getElementById('detailBankName').textContent = `${bank.name}（共 ${questions.length} 题）`;
+  state.detailBankName = bank ? bank.name : '题库';
+  state.detailQuestions = questions;
 
+  const searchInput = document.getElementById('detailSearchInput');
+  if (searchInput) searchInput.value = state.detailSearch || '';
+
+  renderDetailQuestions();
+  showModal('bankDetailModal', true);
+}
+
+// 渲染题库详情里的题目列表（支持关键词过滤 / 单题定位）
+function renderDetailQuestions() {
   const listEl = document.getElementById('detailQuestions');
-  listEl.innerHTML = questions.map((q, idx) => {
+  const nameEl = document.getElementById('detailBankName');
+  if (!listEl) return;
+
+  const all = state.detailQuestions || [];
+  const kw = String(state.detailSearch || '').trim();
+  const filtering = !!(kw || state.detailFocusId);
+
+  let list = all;
+  if (state.detailFocusId) {
+    list = all.filter(q => q.id === state.detailFocusId);
+  } else if (kw) {
+    list = all.filter(q => questionMatchesKeyword(q, kw));
+  }
+
+  if (nameEl) {
+    nameEl.textContent = filtering
+      ? `${state.detailBankName}（命中 ${list.length} / 共 ${all.length} 题）`
+      : `${state.detailBankName}（共 ${all.length} 题）`;
+  }
+
+  const tip = filtering
+    ? `<div class="mb-3 flex items-center justify-between gap-2 text-sm text-gray-500">
+         <span>${state.detailFocusId ? '已定位到命中的题目' : `包含「${escapeHtml(kw)}」的题目 ${list.length} 条`}</span>
+         <button onclick="clearDetailFilter()" class="text-blue-500 hover:text-blue-700 text-xs flex-shrink-0">显示全部题目</button>
+       </div>`
+    : '';
+
+  if (list.length === 0) {
+    listEl.innerHTML = tip + `<div class="text-center text-gray-400 py-10">没有匹配的题目</div>`;
+    return;
+  }
+
+  const orderMap = new Map(all.map((q, i) => [q.id, i]));
+  listEl.innerHTML = tip + list.map(q => {
+    const idx = orderMap.has(q.id) ? orderMap.get(q.id) : 0;
     const optKeys = Object.keys(q.options || {}).filter(k => q.options[k]).sort();
     return `
       <div class="border border-gray-200 rounded-lg p-4 mb-3 hover:border-blue-300 transition">
@@ -3117,8 +3528,15 @@ async function viewBankDetail(bankId) {
       </div>
     `;
   }).join('');
+}
 
-  showModal('bankDetailModal', true);
+// 清除题库详情里的搜索 / 定位，恢复显示全部题目
+function clearDetailFilter() {
+  state.detailFocusId = null;
+  state.detailSearch = '';
+  const searchInput = document.getElementById('detailSearchInput');
+  if (searchInput) searchInput.value = '';
+  renderDetailQuestions();
 }
 
 // 修复题库中题型错误的题目（答案只有一个但被标为多选的题）
@@ -3160,8 +3578,8 @@ async function fixBankQuestionTypes() {
     }
   }
   
-  // 重新加载详情显示
-  viewBankDetail(bankId);
+  // 重新加载详情显示（保留当前搜索/定位状态）
+  viewBankDetail(bankId, null, true);
   
   if (fixedCount > 0) {
     alert(`修复完成！共修正了 ${fixedCount} 道题的题型。`);
@@ -3722,9 +4140,9 @@ async function saveQuestionEdit() {
 
   closeEditQuestionModal();
 
-  // 如果详情页打开着，刷新详情
+  // 如果详情页打开着，刷新详情（保留当前的搜索/定位状态）
   if (state.detailBankId === q.bankId) {
-    viewBankDetail(q.bankId);
+    viewBankDetail(q.bankId, null, true);
   }
 
   alert('保存成功');
@@ -3774,6 +4192,9 @@ function savePracticeProgress() {
     wrongCount: p.wrongCount,
     answers: p.answers,
     totalQuestions: p.questions.length,
+    // 记录本轮题目顺序：乱序刷题续刷时才能恢复成同样的顺序
+    questionIds: p.questions.map(q => q.id),
+    orderMode: practiceOrderMode,
     timestamp: Date.now()
   };
 
@@ -3858,6 +4279,53 @@ function clearWrongPracticeProgress() {
     localStorage.removeItem(WRONG_PRACTICE_PROGRESS_KEY);
   } catch (e) {}
   markRecordsDirty();
+}
+
+// ========== 刷题顺序（顺序 / 乱序） ==========
+const PRACTICE_ORDER_KEY = 'practice_order_mode';
+let practiceOrderMode = 'seq'; // seq | shuffle
+
+function loadPracticeOrder() {
+  try {
+    const v = localStorage.getItem(PRACTICE_ORDER_KEY);
+    practiceOrderMode = (v === 'shuffle') ? 'shuffle' : 'seq';
+  } catch (e) {
+    practiceOrderMode = 'seq';
+  }
+  updatePracticeOrderUI();
+}
+
+function setPracticeOrder(mode) {
+  practiceOrderMode = (mode === 'shuffle') ? 'shuffle' : 'seq';
+  try { localStorage.setItem(PRACTICE_ORDER_KEY, practiceOrderMode); } catch (e) {}
+  updatePracticeOrderUI();
+}
+
+// 同步更新页面上所有"顺序 / 乱序"开关的选中样式
+function updatePracticeOrderUI() {
+  document.querySelectorAll('[data-order-toggle]').forEach(toggle => {
+    toggle.querySelectorAll('[data-order]').forEach(btn => {
+      const active = btn.dataset.order === practiceOrderMode;
+      btn.classList.toggle('bg-white', active);
+      btn.classList.toggle('shadow-sm', active);
+      btn.classList.toggle('text-gray-800', active);
+      btn.classList.toggle('font-medium', active);
+      btn.classList.toggle('text-gray-500', !active);
+    });
+  });
+}
+
+// 按当前顺序设置排列题目（乱序：每次开始新的一轮重新打乱）
+function applyPracticeOrder(questions) {
+  const arr = Array.isArray(questions) ? questions.slice() : [];
+  if (practiceOrderMode !== 'shuffle' || arr.length <= 1) return arr;
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+  return arr;
 }
 
 // ========== 刷题功能 ==========
@@ -3989,7 +4457,14 @@ async function resumePractice(bankId) {
   if (!progress) return;
 
   const bank = await getBankById(progress.bankId);
-  const questions = await dbGetByIndex('questions', 'bankId', progress.bankId);
+  let questions = await dbGetByIndex('questions', 'bankId', progress.bankId);
+
+  // 恢复上次的题目顺序（乱序刷题续刷时，否则题目和已答记录会对不上）
+  if (Array.isArray(progress.questionIds) && progress.questionIds.length === questions.length) {
+    const byId = new Map(questions.map(q => [q.id, q]));
+    const reordered = progress.questionIds.map(id => byId.get(id)).filter(Boolean);
+    if (reordered.length === questions.length) questions = reordered;
+  }
 
   if (questions.length === 0) {
     alert('题库已不存在');
@@ -4054,10 +4529,13 @@ async function startPractice(bankId) {
   bank.totalRounds = (bank.totalRounds || 0) + 1;
   await dbPut('banks', bank);
 
+  // 按当前"顺序 / 乱序"设置排列本轮题目（乱序时每次重新开始都会重新打乱）
+  const orderedQuestions = applyPracticeOrder(questions);
+
   state.practice = {
     bankId: bankId,
     bankName: bank.name,
-    questions: questions,
+    questions: orderedQuestions,
     currentIndex: 0,
     selectedOption: null,
     answered: false,
@@ -5557,6 +6035,9 @@ async function startWrongPractice() {
     return;
   }
 
+  // 按当前"顺序 / 乱序"设置排列本次专刷题目
+  questions = applyPracticeOrder(questions);
+
   // 开始新一轮 → 轮次+1
   const bank = await getBankById(wrongState.currentBankId);
   if (bank) {
@@ -5605,6 +6086,9 @@ async function startFavoritePractice(bankId) {
     alert('没有收藏的题目可刷');
     return;
   }
+
+  // 按当前"顺序 / 乱序"设置排列本次专刷题目
+  questions = applyPracticeOrder(questions);
 
   // 收藏题专刷不计入题库轮次（不修改 bank.totalRounds）
 
@@ -7135,12 +7619,14 @@ window.addEventListener('resize', () => {
 
 async function init() {
   await openDB();
+  loadPracticeOrder();
   refreshSyncBadge();
   const verEl = document.getElementById('appVersion');
   if (verEl) verEl.textContent = APP_VERSION;
 
   // 1) 先用本地数据渲染，避免等待云端造成白屏
   loadBanks();
+  checkExportReminder();
   checkOnline();
   updateAIFloatingBtn();
   initFABDraggable();
