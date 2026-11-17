@@ -798,12 +798,17 @@
       <h3 class="text-lg font-bold text-gray-800">云端历史版本</h3>
       <button onclick="showModal('backupModal', false)" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
     </div>
-    <p class="text-xs text-gray-400 mb-3">每天自动保留一份快照，最多保留 10 份。恢复会用该快照覆盖当前数据。</p>
-    <div class="flex gap-2 mb-3">
+    <p class="text-xs text-gray-400 mb-3">每天首次上传时自动存一份，恢复前也会自动存一份；最多保留 10 份。恢复会用该快照覆盖当前数据。</p>
+    <div class="flex gap-2 mb-2">
       <button onclick="loadBackupList('banks')" id="backupTabBanks" class="flex-1 px-3 py-1.5 rounded-lg text-sm bg-blue-500 text-white">题库快照</button>
       <button onclick="loadBackupList('records')" id="backupTabRecords" class="flex-1 px-3 py-1.5 rounded-lg text-sm bg-gray-100 text-gray-600">记录快照</button>
     </div>
+    <div id="backupCountHint" class="text-xs text-gray-400 mb-1"></div>
     <div id="backupList" class="flex-1 overflow-y-auto scrollbar-thin text-sm text-gray-500">加载中…</div>
+    <div class="flex items-center justify-between gap-2 pt-3 mt-2 border-t border-gray-100">
+      <span class="text-xs text-gray-400">想马上验证？手动存一份试试</span>
+      <button id="backupCreateBtn" onclick="createSnapshotFromModal()" class="px-3 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition font-medium flex-shrink-0">立即生成快照</button>
+    </div>
   </div>
 </div>
 
@@ -1185,7 +1190,7 @@ const BANKS_MAX_WAIT_MS = 600000;   // 题库持续改动时，最多累计 10 �
 const RECORDS_THROTTLE_MS = 300000; // 记录改动：5 分钟批量上传一次
 const EXIT_FLUSH_MIN_AGE_MS = 60000; // 切到后台时，改动不足 1 分钟不触发上传（避免频繁切换 App 反复上传）
 
-const APP_VERSION = '云端同步版 v2.4'; // 当前页面版本标识（v2.4：安全加固 + 刷题顺序 / 搜索 / 同步面板 / 备份提醒）
+const APP_VERSION = '云端同步版 v2.4.2'; // 当前页面版本标识（v2.4.2：错题专刷 / 看题复习也按"错误次数"筛选；v2.4.1：历史版本列表修复）
 
 const MAX_RETRIES = 3;         // 同步失败自动重试次数
 const RETRY_BASE_MS = 10000;   // 重试基础间隔（10s → 20s → 40s 指数退避）
@@ -1418,11 +1423,37 @@ async function listBackups(kind) {
   const res = await fetch(`${SUPABASE_URL}/storage/v1/object/list/${STORAGE_BUCKET}`, {
     method: 'POST',
     headers: getStorageHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ prefix: `${BACKUP_PREFIX}${kind}-`, limit: 100, sortBy: { column: 'name', order: 'asc' } })
+    // 注意：这里用目录前缀 backups/，不要用 backups/banks- 这种"半个文件名"。
+    // Storage 的 list 把 prefix 当文件夹处理时，半截前缀会一个都列不出来。
+    body: JSON.stringify({ prefix: BACKUP_PREFIX, limit: 100, offset: 0, sortBy: { column: 'name', order: 'asc' } })
   });
-  if (!res.ok) throw new Error(`列出版本失败 (${res.status})`);
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`列出版本失败 (${res.status})${errText ? '：' + errText.slice(0, 120) : ''}`);
+  }
   const arr = await res.json();
-  return arr.map(o => o.name).filter(n => n && n.endsWith('.json')).sort();
+  if (!Array.isArray(arr)) return [];
+  const wantPrefix = BACKUP_PREFIX + kind + '-';
+  return arr
+    .map(o => normalizeBackupKey(o && o.name))
+    .filter(k => k && k.indexOf(wantPrefix) === 0 && k.endsWith('.json'))
+    .sort((a, b) => backupTimeOf(a) - backupTimeOf(b) || a.localeCompare(b));
+}
+
+// 有的实现返回 "backups/xxx.json"，有的只返回 "xxx.json"，统一补全成完整路径
+function normalizeBackupKey(name) {
+  const n = String(name || '').replace(/^\/+/, '');
+  if (!n) return '';
+  return n.indexOf(BACKUP_PREFIX) === 0 ? n : BACKUP_PREFIX + n;
+}
+
+// 从快照文件名推出时间，用于"保留最近 10 份"的排序
+function backupTimeOf(key) {
+  const m1 = String(key).match(/(\d{4})-(\d{2})-(\d{2})\.json$/);
+  if (m1) return new Date(+m1[1], +m1[2] - 1, +m1[3]).getTime();
+  const m2 = String(key).match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/);
+  if (m2) return new Date(+m2[1], +m2[2] - 1, +m2[3], +m2[4], +m2[5], +m2[6]).getTime();
+  return 0;
 }
 
 async function copyObject(sourceKey, destKey) {
@@ -1431,7 +1462,10 @@ async function copyObject(sourceKey, destKey) {
     headers: getStorageHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ bucketId: STORAGE_BUCKET, sourceKey, destinationKey: destKey })
   });
-  if (!res.ok) throw new Error(`复制快照失败 (${res.status})`);
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`复制快照失败 (${res.status})${errText ? '：' + errText.slice(0, 120) : ''}`);
+  }
 }
 
 async function deleteObject(key) {
@@ -1442,31 +1476,63 @@ async function deleteObject(key) {
   if (!res.ok) throw new Error(`删除快照失败 (${res.status})`);
 }
 
-// 每天首次上传前，把云端当前版本复制一份（服务端复制，不耗本地流量）
-async function ensureDailySnapshot(kind, sourceFile) {
-  const name = `${kind}-${todayStr()}.json`;
-  const names = await listBackups(kind);
-  if (names.includes(name)) return;
-  await copyObject(sourceFile, BACKUP_PREFIX + name);
-  const all = [...names, name].sort();
-  while (all.length > BACKUP_KEEP) {
-    await deleteObject(BACKUP_PREFIX + all.shift());
+// 生成一份快照：优先用服务端复制（不耗流量），复制失败就下载后重新上传兜底
+async function createSnapshot(sourceFile, destKey) {
+  try {
+    await copyObject(sourceFile, destKey);
+    console.info('已生成云端快照（服务端复制）:', destKey);
+    return;
+  } catch (e) {
+    console.warn('服务端复制快照失败，改为下载后上传:', e);
+  }
+  const text = await storageDownload(sourceFile);
+  if (text === null) throw new Error('云端还没有数据文件，暂时无法生成快照');
+  await storageUpload(destKey, text, 'application/json');
+  console.info('已生成云端快照（下载后上传）:', destKey);
+}
+
+// 只保留最近 BACKUP_KEEP 份（列不出来就跳过清理，不影响已生成的快照）
+async function pruneBackups(kind) {
+  let names = [];
+  try {
+    names = await listBackups(kind);
+  } catch (e) {
+    console.warn('列出快照失败，跳过清理:', e);
+    return;
+  }
+  if (names.length <= BACKUP_KEEP) return;
+  const sorted = names.slice().sort((a, b) => backupTimeOf(a) - backupTimeOf(b) || a.localeCompare(b));
+  const extra = sorted.slice(0, sorted.length - BACKUP_KEEP);
+  for (const key of extra) {
+    try { await deleteObject(key); } catch (e) { console.warn('删除旧快照失败:', key, e); }
   }
 }
 
-// 立即生成一份快照（恢复前用，避免当天已有快照时当前版本丢失）
+// 每天首次上传前，把云端当前版本存一份
+async function ensureDailySnapshot(kind, sourceFile) {
+  const key = BACKUP_PREFIX + `${kind}-${todayStr()}.json`;
+  let names = [];
+  try {
+    names = await listBackups(kind);
+  } catch (e) {
+    // 列不出来也照样生成（同名覆盖是幂等的），保证每天至少有一份
+    console.warn('列出快照失败，仍尝试生成今日快照:', e);
+  }
+  if (names.indexOf(key) >= 0) return key;
+  await createSnapshot(sourceFile, key);
+  await pruneBackups(kind);
+  return key;
+}
+
+// 立即生成一份快照（手动生成 / 恢复前备份）
 async function snapshotNow(kind, sourceFile) {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-  const name = `${kind}-manual-${stamp}.json`;
-  const names = await listBackups(kind);
-  await copyObject(sourceFile, BACKUP_PREFIX + name);
-  const all = [...names, name].sort();
-  while (all.length > BACKUP_KEEP) {
-    await deleteObject(BACKUP_PREFIX + all.shift());
-  }
-  return name;
+  const key = BACKUP_PREFIX + `${kind}-manual-${stamp}.json`;
+  await createSnapshot(sourceFile, key);
+  await pruneBackups(kind);
+  return key;
 }
 
 let backupKind = 'banks';
@@ -1481,6 +1547,7 @@ async function loadBackupList(kind) {
   const banksTab = document.getElementById('backupTabBanks');
   const recTab = document.getElementById('backupTabRecords');
   const listEl = document.getElementById('backupList');
+  const countEl = document.getElementById('backupCountHint');
   const on = 'flex-1 px-3 py-1.5 rounded-lg text-sm bg-blue-500 text-white';
   const off = 'flex-1 px-3 py-1.5 rounded-lg text-sm bg-gray-100 text-gray-600';
   if (banksTab) banksTab.className = kind === 'banks' ? on : off;
@@ -1488,28 +1555,73 @@ async function loadBackupList(kind) {
   listEl.textContent = '加载中…';
   try {
     const names = await listBackups(kind);
+    if (countEl) countEl.textContent = names.length ? `云端现有 ${names.length} / ${BACKUP_KEEP} 份` : '';
     if (!names.length) {
-      listEl.innerHTML = '<div class="py-6 text-center text-gray-400">暂无历史版本<br><span class="text-xs">每天首次上传时会自动生成一份</span></div>';
+      listEl.innerHTML = `<div class="py-6 text-center text-gray-400">
+        <div>还没有历史版本</div>
+        <div class="text-xs mt-1">每天首次上传时会自动生成；也可以点下面的"立即生成快照"</div>
+      </div>`;
       return;
     }
     listEl.innerHTML = names.slice().reverse().map(n => {
-      const label = n.replace(/^.*\//, '').replace(/\.json$/, '');
-      return `<div class="flex items-center justify-between py-2 border-b border-gray-100">
-        <span class="text-gray-700">${escapeHtml(label)}</span>
-        <button onclick="restoreBackup(${jsArg(kind)},${jsArg(n)})" class="px-3 py-1 text-xs bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100">恢复</button>
+      const file = n.replace(/^.*\//, '');
+      const isManual = file.indexOf('-manual-') >= 0;
+      const label = file.replace(/\.json$/, '');
+      return `<div class="flex items-center justify-between gap-2 py-2 border-b border-gray-100">
+        <span class="text-gray-700 truncate">${escapeHtml(label)}</span>
+        <div class="flex items-center gap-2 flex-shrink-0">
+          ${isManual ? '<span class="text-xs px-1.5 py-0.5 bg-purple-50 text-purple-600 rounded">手动</span>' : ''}
+          <button onclick="restoreBackup(${jsArg(kind)},${jsArg(n)})" class="px-3 py-1 text-xs bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100">恢复</button>
+        </div>
       </div>`;
     }).join('');
   } catch(e) {
-    listEl.innerHTML = `<div class="py-6 text-center text-red-500">${escapeHtml(e && e.message ? e.message : String(e))}</div>`;
+    const msg = escapeHtml(e && e.message ? e.message : String(e));
+    if (countEl) countEl.textContent = '';
+    listEl.innerHTML = `<div class="py-6 text-center text-red-500">
+      <div>${msg}</div>
+      <div class="text-xs text-gray-400 mt-2">可能是网络或权限问题；确认已登录云端账号后，再点"立即生成快照"试试</div>
+    </div>`;
+  }
+}
+
+// 手动生成一份快照（用于确认功能可用、或恢复前留一手）
+async function createSnapshotFromModal() {
+  const kind = backupKind;
+  const sourceFile = kind === 'banks' ? BANKS_FILE : RECORDS_FILE;
+  const btn = document.getElementById('backupCreateBtn');
+  const listEl = document.getElementById('backupList');
+  if (btn) { btn.disabled = true; btn.classList.add('opacity-60'); }
+  if (listEl) listEl.textContent = '正在生成快照…';
+  try {
+    const key = await snapshotNow(kind, sourceFile);
+    const fileName = key.replace(/^.*\//, '').replace(/\.json$/, '');
+    // 生成完再列一次，顺便验证"能不能读回列表"
+    const names = await listBackups(kind).catch(() => null);
+    await loadBackupList(kind);
+    if (names === null) {
+      alert('快照已上传，但读取列表失败（可能是网络或登录状态问题）。\n快照文件：' + fileName);
+    } else if (names.indexOf(key) < 0) {
+      alert('快照已上传，但列表里没有显示它（可能是存储桶的 list 权限问题）。\n快照文件：' + fileName);
+    } else {
+      alert('已生成快照：' + fileName);
+    }
+  } catch (e) {
+    console.error('生成快照失败:', e);
+    try { await loadBackupList(kind); } catch (err) {}
+    alert('生成快照失败：' + (e && e.message ? e.message : e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.classList.remove('opacity-60'); }
   }
 }
 
 async function restoreBackup(kind, name) {
   const label = kind === 'banks' ? '题库' : '记录';
-  if (!confirm(`确定用「${name}」覆盖当前${label}数据吗？\n恢复前会先自动备份当前云端版本，可随时再恢复回来。`)) return;
+  const display = String(name).replace(/^.*\//, '').replace(/\.json$/, '');
+  if (!confirm(`确定用「${display}」覆盖当前${label}数据吗？\n恢复前会先自动备份当前云端版本，可随时再恢复回来。`)) return;
   try {
     try { await snapshotNow(kind, kind === 'banks' ? BANKS_FILE : RECORDS_FILE); } catch(e) { console.warn('恢复前生成快照失败:', e); }
-    const text = await storageDownload(BACKUP_PREFIX + name);
+    const text = await storageDownload(name);
     if (text === null) throw new Error('快照文件不存在');
     const data = JSON.parse(text);
     if (kind === 'banks') {
@@ -4250,6 +4362,7 @@ function saveWrongPracticeProgress() {
   const progress = {
     bankId: wrongState.currentBankId,
     sourceTab: p.sourceTab || 'unmastered',
+    sourceFilter: p.sourceFilter || 'all',
     currentIndex: p.currentIndex,
     correctCount: p.correctCount,
     wrongCount: p.wrongCount,
@@ -5317,9 +5430,11 @@ async function checkWrongPracticeProgress(bankId) {
     : sourceTab === 'all' ? '全部'
     : sourceTab === 'favorite' ? '收藏题'
     : '未掌握';
+  const filterMin = getWrongFilterMin(progress.sourceFilter || 'all');
+  const filterText = filterMin > 1 ? `（错 ≥${filterMin} 次）` : '';
 
   document.getElementById('wrongProgressInfo').textContent =
-    `${tabName}专刷 · 已做 ${currentQ} / ${totalQ} 题（对 ${progress.correctCount}，错 ${progress.wrongCount}）`;
+    `${tabName}专刷${filterText} · 已做 ${currentQ} / ${totalQ} 题（对 ${progress.correctCount}，错 ${progress.wrongCount}）`;
 
   showModal('wrongProgressModal', true);
 }
@@ -5407,7 +5522,9 @@ async function resumeWrongPractice() {
     : sourceTab === 'all' ? '全部错题专刷'
     : sourceTab === 'favorite' ? '收藏题专刷'
     : '错题专刷';
-  document.getElementById('wrongDetailStats').textContent = tabName + ' · 共 ' + questions.length + ' 题';
+  const resumeFilterMin = getWrongFilterMin(progress.sourceFilter || 'all');
+  const resumeFilterText = resumeFilterMin > 1 ? `（错 ≥${resumeFilterMin} 次）` : '';
+  document.getElementById('wrongDetailStats').textContent = tabName + resumeFilterText + ' · 共 ' + questions.length + ' 题';
 
   // 按钮状态
   document.getElementById('wrongListMode').className = 'px-4 py-2 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition text-sm font-medium';
@@ -5555,25 +5672,48 @@ function showWrongList() {
   if (typeof updateAIFloatingBtn === 'function') updateAIFloatingBtn();
 }
 
+// ========== 错题筛选（三个 tab 共用，专刷 / 看题复习也要按筛选走） ==========
+// 当前筛选条件对应的"最少错误次数"：'all' → 0，2/3/5 → 对应次数
+function getWrongFilterMin(filter) {
+  return filter === 'all' ? 0 : (parseInt(filter, 10) || 0);
+}
+
+// 按 tab 取基础列表
+function getWrongTabQuestions(tab) {
+  if (tab === 'mastered') return wrongState.masteredQuestions || [];
+  if (tab === 'all') return wrongState.allHistoryQuestions || [];
+  return wrongState.wrongQuestions || [];
+}
+
+// 套用"错误次数 ≥ N"筛选（N ≤ 1 时不筛）
+function filterWrongQuestions(list, filter) {
+  const arr = Array.isArray(list) ? list.slice() : [];
+  const min = getWrongFilterMin(filter);
+  if (min <= 1) return arr;
+  const stats = wrongState.questionStats || {};
+  return arr.filter(q => {
+    const s = stats[q.id];
+    return s && (s.wrong || 0) >= min;
+  });
+}
+
+// 当前 tab + 筛选条件下，真正要拿去专刷 / 看题复习的题目
+function getFilteredWrongQuestions(tab) {
+  return filterWrongQuestions(getWrongTabQuestions(tab), wrongState.filter || 'all');
+}
+
 function startWrongView() {
   // 收藏题模式下不执行错题的看题复习逻辑（由 onclick 单独处理）
   if (wrongState.detailMode === 'favorite') return;
   const tab = wrongState.tab || 'unmastered';
-  let questions;
-  let viewTitle;
-  if (tab === 'mastered') {
-    questions = wrongState.masteredQuestions || [];
-    viewTitle = '浏览已掌握题';
-  } else if (tab === 'all') {
-    questions = wrongState.allHistoryQuestions || [];
-    viewTitle = '全部错题浏览';
-  } else {
-    questions = wrongState.wrongQuestions || [];
-    viewTitle = '看题复习';
-  }
+  const filterMin = getWrongFilterMin(wrongState.filter || 'all');
+  const questions = getFilteredWrongQuestions(tab);
+  let viewTitle = tab === 'mastered' ? '浏览已掌握题' : (tab === 'all' ? '全部错题浏览' : '看题复习');
+  if (filterMin > 1) viewTitle += `（错 ≥${filterMin} 次）`;
 
   if (questions.length === 0) {
-    if (tab === 'mastered') alert('没有已掌握的题');
+    if (filterMin > 1) alert(`当前筛选（错 ≥${filterMin} 次）下没有题目，换个筛选条件试试`);
+    else if (tab === 'mastered') alert('没有已掌握的题');
     else if (tab === 'all') alert('还没有历史错题');
     else alert('没有错题');
     return;
@@ -5583,7 +5723,8 @@ function startWrongView() {
   wrongState.view = {
     questions: questions,
     currentIndex: 0,
-    sourceTab: tab
+    sourceTab: tab,
+    sourceFilter: wrongState.filter || 'all'
   };
 
   // 隐藏其他区域
@@ -5647,10 +5788,18 @@ function updateFilterButtons() {
   const activeColor = tab === 'mastered' ? 'bg-green-500 text-white' : 'bg-red-500 text-white';
   const inactiveColor = 'border border-gray-200 text-gray-600 hover:bg-gray-50';
 
+  // 不同 tab 下用更贴切的措辞（判断逻辑完全一样，都是"错误次数 ≥ N"）
+  const labels = tab === 'all'
+    ? { all: '全部错题', 2: '错 ≥2 次', 3: '错 ≥3 次', 5: '错 ≥5 次' }
+    : tab === 'mastered'
+      ? { all: '全部', 2: '曾错 ≥2 次', 3: '曾错 ≥3 次', 5: '曾错 ≥5 次' }
+      : { all: '全部错题', 2: '第2轮仍错 ≥2次', 3: '第3轮仍错 ≥3次', 5: '顽固错题 ≥5次' };
+
   ['All', '2', '3', '5'].forEach(k => {
     const btn = document.getElementById('wrongFilter' + k);
     if (!btn) return;
     const val = k === 'All' ? 'all' : parseInt(k);
+    if (labels[val]) btn.textContent = labels[val];
     if (val === filter) {
       btn.className = 'px-3 py-1.5 text-sm rounded-full font-medium ' + activeColor;
     } else {
@@ -5686,15 +5835,9 @@ function setWrongTab(tab) {
     tabMa.className = activeCls + ' text-green-600';
   }
 
-  // 全部模式下隐藏筛选条（不按错误次数分组）
+  // 三个 tab 都保留"错误次数"筛选条
   const filterBar = document.getElementById('wrongDetailFilterBar');
-  if (filterBar) {
-    if (tab === 'all') {
-      filterBar.classList.add('hidden');
-    } else {
-      filterBar.classList.remove('hidden');
-    }
-  }
+  if (filterBar) filterBar.classList.remove('hidden');
 
   updateFilterButtons();
   renderWrongReviewList();
@@ -5728,7 +5871,27 @@ function renderWrongReviewList() {
     questions = wrongState.wrongQuestions || [];
   }
 
+  // 全部模式：按"错误次数 ≥ N"筛选（其他 tab 仍按下面的分组筛选）
+  const totalBeforeFilter = questions.length;
+  const filterMin = filter === 'all' ? 0 : (parseInt(filter, 10) || 0);
+  if (isAllTab && filterMin > 1) {
+    questions = questions.filter(q => {
+      const s = stats[q.id];
+      return s && (s.wrong || 0) >= filterMin;
+    });
+  }
+
   if (questions.length === 0) {
+    // 有错题、只是被筛选条件过滤掉了
+    if (totalBeforeFilter > 0) {
+      groupsEl.innerHTML = `
+        <div class="text-center py-12 bg-white rounded-xl border border-gray-200">
+          <p class="text-gray-400">没有错 ${filterMin} 次以上的题目</p>
+          <button onclick="setWrongFilter('all')" class="mt-3 px-4 py-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition">显示全部错题</button>
+        </div>
+      `;
+      return;
+    }
     if (tab === 'mastered') {
       groupsEl.innerHTML = `
         <div class="text-center py-12 bg-white rounded-xl border border-gray-200">
@@ -6014,22 +6177,14 @@ async function startWrongPractice() {
   // 收藏题模式下不执行错题的专刷逻辑（由 onclick 单独处理）
   if (wrongState.detailMode === 'favorite') return;
   const tab = wrongState.tab || 'unmastered';
-  let questions;
-  let practiceTitle;
-
-  if (tab === 'mastered') {
-    questions = wrongState.masteredQuestions || [];
-    practiceTitle = '重刷已掌握题';
-  } else if (tab === 'all') {
-    questions = wrongState.allHistoryQuestions || [];
-    practiceTitle = '全部错题专刷';
-  } else {
-    questions = wrongState.wrongQuestions || [];
-    practiceTitle = '错题专刷';
-  }
+  const filterMin = getWrongFilterMin(wrongState.filter || 'all');
+  let questions = getFilteredWrongQuestions(tab);
+  let practiceTitle = tab === 'mastered' ? '重刷已掌握题' : (tab === 'all' ? '全部错题专刷' : '错题专刷');
+  if (filterMin > 1) practiceTitle += `（错 ≥${filterMin} 次）`;
 
   if (questions.length === 0) {
-    if (tab === 'mastered') alert('没有已掌握的题可刷');
+    if (filterMin > 1) alert(`当前筛选（错 ≥${filterMin} 次）下没有可刷的题，换个筛选条件试试`);
+    else if (tab === 'mastered') alert('没有已掌握的题可刷');
     else if (tab === 'all') alert('还没有历史错题');
     else alert('没有错题可刷');
     return;
@@ -6054,7 +6209,8 @@ async function startWrongPractice() {
     correctCount: 0,
     wrongCount: 0,
     answers: [],
-    sourceTab: tab // 从哪个 tab 开始的刷题
+    sourceTab: tab, // 从哪个 tab 开始的刷题
+    sourceFilter: wrongState.filter || 'all' // 从哪个筛选条件开始的刷题
   };
 
   // 更新按钮状态
